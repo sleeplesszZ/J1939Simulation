@@ -14,8 +14,7 @@ namespace j1939sim
         SENDING,
         RECEIVING, // 添加接收状态
         WAIT_ACK,
-        COMPLETE,
-        ERROR
+        COMPLETE
     };
 
     // 传输协议命令类型
@@ -23,7 +22,6 @@ namespace j1939sim
     {
         RTS = 16,
         CTS = 17,
-        DT = 18, // 添加数据传输类型
         EndOfMsgAck = 19,
         BAM = 32,
         Abort = 255
