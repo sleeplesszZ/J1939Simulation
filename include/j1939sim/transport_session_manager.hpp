@@ -79,62 +79,46 @@ namespace j1939sim
     public:
         using Clock = std::chrono::steady_clock;
 
-        // 创建发送会话
-        std::shared_ptr<TransportSession> createSenderSession(uint8_t src_addr,
-                                                              uint8_t dst_addr,
-                                                              uint32_t pgn,
-                                                              uint8_t priority, // 添加优先级参数
-                                                              const std::vector<uint8_t> &data)
+        // 修改会话创建函数签名，使用右值引用
+        std::shared_ptr<TransportSession> createSession(uint8_t src_addr,
+                                                        uint8_t dst_addr,
+                                                        uint32_t pgn,
+                                                        uint8_t priority,
+                                                        SessionRole role,
+                                                        std::vector<uint8_t> &&data = std::vector<uint8_t>())
         {
             std::lock_guard<std::mutex> lock(mutex_);
 
-            SessionId id{src_addr, dst_addr, SessionRole::SENDER, pgn};
+            SessionId id{src_addr, dst_addr, role, pgn};
 
             auto it = sessions_.find(id);
             if (it != sessions_.end())
             {
-                return nullptr;
+                if (role == SessionRole::RECEIVER)
+                {
+                    sessions_.erase(it);
+                }
+                else
+                {
+                    return nullptr;
+                }
             }
 
             auto session = std::make_shared<TransportSession>();
             session->src_addr = src_addr;
             session->dst_addr = dst_addr;
             session->pgn = pgn;
-            session->priority = priority; // 保存优先级
-            session->data = data;
-            session->total_packets = (data.size() + 6) / 7;
-            session->is_bam = (dst_addr == 0xFF);
+            session->priority = priority;
             session->last_time = Clock::now();
             session->next_action_time = session->last_time;
 
-            sessions_[id] = session;
-            return session;
-        }
-
-        // 创建接收会话
-        std::shared_ptr<TransportSession> createReceiverSession(uint8_t src_addr,
-                                                                uint8_t dst_addr,
-                                                                uint32_t pgn,
-                                                                uint8_t priority) // 添加优先级参数
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            SessionId id{src_addr, dst_addr, SessionRole::RECEIVER, pgn};
-
-            auto it = sessions_.find(id);
-            if (it != sessions_.end())
+            // 发送方特有的初始化，使用 std::move 转移数据所有权
+            if (role == SessionRole::SENDER)
             {
-                // 当收到同一源地址的相同 PGN（参数组编号）的 RTS 消息时，丢弃旧会话
-                sessions_.erase(it);
+                session->data = std::move(data);
+                session->total_packets = (session->data.size() + 6) / 7;
+                session->is_bam = (dst_addr == 0xFF);
             }
-
-            auto session = std::make_shared<TransportSession>();
-            session->src_addr = src_addr;
-            session->dst_addr = dst_addr;
-            session->pgn = pgn;
-            session->priority = priority; // 保存优先级
-            session->last_time = Clock::now();
-            session->next_action_time = session->last_time;
 
             sessions_[id] = session;
             return session;

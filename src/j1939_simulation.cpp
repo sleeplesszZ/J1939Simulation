@@ -59,11 +59,14 @@ namespace j1939sim
 
         uint8_t dst_addr = id & 0xFF;
         uint32_t pgn = id & 0x3FFFF00;
-        std::vector<uint8_t> data_copy(data, data + length);
 
-        // 创建新的发送会话
-        auto session = session_manager_.createSenderSession(src_addr, dst_addr, pgn,
-                                                            priority, data_copy);
+        // 使用 std::move 构造数据向量
+        std::vector<uint8_t> data_vec(data, data + length);
+
+        // 创建新的发送会话，使用 std::move 转移数据所有权
+        auto session = session_manager_.createSession(src_addr, dst_addr, pgn,
+                                                      priority, SessionRole::SENDER,
+                                                      std::move(data_vec));
         if (!session)
         {
             return false;
@@ -261,6 +264,7 @@ namespace j1939sim
 
                 if (!receive_queue_.empty())
                 {
+                    // 使用 std::move 获取队列中的消息，避免不必要的拷贝
                     msg = std::move(receive_queue_.front());
                     receive_queue_.pop();
                     has_msg = true;
@@ -269,6 +273,7 @@ namespace j1939sim
 
             if (has_msg)
             {
+                // msg 已经是移动后的对象，直接使用即可
                 processReceiveMessage(msg);
             }
         }
@@ -309,7 +314,8 @@ namespace j1939sim
                 uint8_t total_packets = data[2];
 
                 // 创建接收会话
-                session = session_manager_.createReceiverSession(src_addr, dst_addr, pgn, priority);
+                session = session_manager_.createSession(src_addr, dst_addr, pgn,
+                                                         priority, SessionRole::RECEIVER);
                 if (!session)
                 {
                     sendAbort(dst_addr, src_addr, pgn, AbortReason::NO_RESOURCES);
