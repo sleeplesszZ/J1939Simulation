@@ -54,6 +54,7 @@ namespace j1939sim
         uint8_t src_addr{0};
         uint8_t dst_addr{0};
         uint32_t pgn{0};
+        uint8_t priority{7}; // 添加优先级字段，默认为7
         bool is_bam{false};
 
         // 数据管理
@@ -82,6 +83,7 @@ namespace j1939sim
         std::shared_ptr<TransportSession> createSenderSession(uint8_t src_addr,
                                                               uint8_t dst_addr,
                                                               uint32_t pgn,
+                                                              uint8_t priority, // 添加优先级参数
                                                               const std::vector<uint8_t> &data)
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -98,6 +100,7 @@ namespace j1939sim
             session->src_addr = src_addr;
             session->dst_addr = dst_addr;
             session->pgn = pgn;
+            session->priority = priority; // 保存优先级
             session->data = data;
             session->total_packets = (data.size() + 6) / 7;
             session->is_bam = (dst_addr == 0xFF);
@@ -111,7 +114,8 @@ namespace j1939sim
         // 创建接收会话
         std::shared_ptr<TransportSession> createReceiverSession(uint8_t src_addr,
                                                                 uint8_t dst_addr,
-                                                                uint32_t pgn)
+                                                                uint32_t pgn,
+                                                                uint8_t priority) // 添加优先级参数
         {
             std::lock_guard<std::mutex> lock(mutex_);
 
@@ -128,6 +132,7 @@ namespace j1939sim
             session->src_addr = src_addr;
             session->dst_addr = dst_addr;
             session->pgn = pgn;
+            session->priority = priority; // 保存优先级
             session->last_time = Clock::now();
             session->next_action_time = session->last_time;
 

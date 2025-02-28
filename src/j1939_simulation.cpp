@@ -37,6 +37,7 @@ namespace j1939sim
     bool J1939Simulation::transmit(uint32_t id, uint8_t *data, size_t length)
     {
         uint8_t src_addr = (id >> 8) & 0xFF;
+        uint8_t priority = (id >> 26) & 0x7; // 从输入id中提取优先级
 
         // 检查节点是否可以发送
         if (!node_manager_.canTransmit(src_addr))
@@ -61,7 +62,8 @@ namespace j1939sim
         std::vector<uint8_t> data_copy(data, data + length);
 
         // 创建新的发送会话
-        auto session = session_manager_.createSenderSession(src_addr, dst_addr, pgn, data_copy);
+        auto session = session_manager_.createSenderSession(src_addr, dst_addr, pgn,
+                                                            priority, data_copy);
         if (!session)
         {
             return false;
@@ -294,6 +296,7 @@ namespace j1939sim
     {
         uint8_t src_addr = id & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
+        uint8_t priority = (id >> 26) & 0x7; // 提取优先级
         TpCmType cmd = static_cast<TpCmType>(data[0]);
         uint32_t pgn = (data[6] << 16) | (data[5] << 8) | (data[4]);
 
@@ -306,7 +309,7 @@ namespace j1939sim
                 uint8_t total_packets = data[2];
 
                 // 创建接收会话
-                session = session_manager_.createReceiverSession(src_addr, dst_addr, pgn);
+                session = session_manager_.createReceiverSession(src_addr, dst_addr, pgn, priority);
                 if (!session)
                 {
                     sendAbort(dst_addr, src_addr, pgn, AbortReason::NO_RESOURCES);
@@ -458,7 +461,7 @@ namespace j1939sim
             static_cast<uint8_t>((session.pgn >> 16) & 0xFF),
             0xFF};
 
-        uint32_t id = (PGN_TP_CM << 8) | session.dst_addr;
+        uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | session.dst_addr;
         return transmitter(id, data, 8, context);
     }
 
@@ -474,7 +477,7 @@ namespace j1939sim
             static_cast<uint8_t>((session.pgn >> 16) & 0xFF),
             0xFF};
 
-        uint32_t id = (PGN_TP_CM << 8) | 0xFF;
+        uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | 0xFF;
         return transmitter(id, data, 8, context);
     }
 
@@ -487,7 +490,8 @@ namespace j1939sim
 
         std::copy_n(session.data.begin() + offset, length, data + 1);
 
-        uint32_t id = (PGN_TP_DT << 8) | (session.is_bam ? 0xFF : session.dst_addr);
+        uint32_t id = (session.priority << 26) | (PGN_TP_DT << 8) |
+                      (session.is_bam ? 0xFF : session.dst_addr);
         return transmitter(id, data, 8, context);
     }
 
@@ -504,7 +508,7 @@ namespace j1939sim
             0xFF,
             0xFF};
 
-        uint32_t id = (PGN_TP_CM << 8) | src_addr;
+        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | src_addr; // 使用默认优先级7
         return transmitter(id, data, 8, context);
     }
 
@@ -521,7 +525,7 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 16) & 0xFF),
             0xFF};
 
-        uint32_t id = (PGN_TP_CM << 8) | dst_addr;
+        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | dst_addr; // 使用默认优先级7
         return transmitter(id, data, 8, context);
     }
 
@@ -538,7 +542,7 @@ namespace j1939sim
             0xFF,
             0xFF};
 
-        uint32_t id = (PGN_TP_CM << 8) | src_addr;
+        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | src_addr; // 使用默认优先级7
         return transmitter(id, data, 8, context);
     }
 
