@@ -249,9 +249,7 @@ namespace j1939sim
     {
         while (running_)
         {
-            ReceiveData msg;
-            bool has_msg = false;
-
+            std::vector<ReceiveData> messages;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex_);
                 queue_cv_.wait(lock, [this]()
@@ -262,18 +260,17 @@ namespace j1939sim
                     break;
                 }
 
-                if (!receive_queue_.empty())
+                // 一次性获取队列中的所有消息
+                while (!receive_queue_.empty())
                 {
-                    // 使用 std::move 获取队列中的消息，避免不必要的拷贝
-                    msg = std::move(receive_queue_.front());
+                    messages.push_back(std::move(receive_queue_.front()));
                     receive_queue_.pop();
-                    has_msg = true;
                 }
             }
 
-            if (has_msg)
+            // 批量处理所有消息
+            for (const auto &msg : messages)
             {
-                // msg 已经是移动后的对象，直接使用即可
                 processReceiveMessage(msg);
             }
         }

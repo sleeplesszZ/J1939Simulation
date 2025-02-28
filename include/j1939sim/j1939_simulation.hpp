@@ -75,15 +75,13 @@ namespace j1939sim
         bool sendDataPacket(const TransportSession &session, size_t packet_number);
         bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn, AbortReason reason);
 
-        std::unique_ptr<AsyncWorker> worker_;
-        void handleLongMessage(uint32_t id, const std::vector<uint8_t> &data);
-
-        TransportSessionManager session_manager_;
         void processTransportSessions();
         bool processSession(std::shared_ptr<TransportSession> session);
         void scheduleNextCheck(std::shared_ptr<TransportSession> session,
                                std::chrono::milliseconds delay);
 
+        std::unique_ptr<AsyncWorker> worker_;
+        TransportSessionManager session_manager_;
         NodeManager node_manager_;
 
         // 添加接收消息队列相关
