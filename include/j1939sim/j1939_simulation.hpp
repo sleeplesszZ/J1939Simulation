@@ -70,7 +70,7 @@ namespace j1939sim
         bool handleTPDataTransfer(uint32_t id, const uint8_t *data, size_t length);
         bool handleTPConnectMangement(uint32_t id, const uint8_t *data, size_t length);
         bool sendRTS(const TransportSession &session);
-        bool sendCTS(uint8_t src_addr, uint8_t num_packets, uint8_t next_packet);
+        bool sendCTS(const std::shared_ptr<TransportSession> &session, uint8_t num_packets);
         bool sendEndOfMsgAck(uint8_t src_addr);
         bool sendBAM(const TransportSession &session);
         bool sendDataPacket(const TransportSession &session, size_t packet_number);
@@ -104,8 +104,6 @@ namespace j1939sim
 
         void checkAndScheduleSessions();
         void wakeupSessionProcessor();
-
-        bool handleCTS(std::shared_ptr<TransportSession> session, const uint8_t *data);
     };
 
 } // namespace j1939sim

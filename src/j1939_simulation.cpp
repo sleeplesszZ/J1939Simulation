@@ -57,8 +57,27 @@ namespace j1939sim
             return transmitter(id, data, length, context);
         }
 
-        uint8_t dst_addr = (id >> 8) & 0xFF; // Fix: get destination address from byte 1
-        uint32_t pgn = id & 0x3FFFF00;
+        // 从 CAN ID 中提取各个字段
+        uint8_t edp = (id >> 24) & 0x1; // Extended Data Page
+        uint8_t dp = (id >> 25) & 0x1;  // Data Page
+        uint8_t pf = (id >> 16) & 0xFF; // PDU Format
+        uint8_t ps = (id >> 8) & 0xFF;  // PDU Specific
+
+        uint32_t pgn;
+        uint8_t dst_addr;
+
+        if (pf < 240) // PDU1 format
+        {
+            // PDU1: PGN = (EDP)(DP)(PF), PS field contains destination address
+            pgn = (edp << 17) | (dp << 16) | (pf << 8);
+            dst_addr = ps;
+        }
+        else // PDU2 format
+        {
+            // PDU2: PGN = (EDP)(DP)(PF)(PS)
+            pgn = (edp << 17) | (dp << 16) | (pf << 8) | ps;
+            dst_addr = 0xFF; // PDU2 messages are always destination specific
+        }
 
         // 使用 std::move 构造数据向量
         std::vector<uint8_t> data_vec(data, data + length);
@@ -278,20 +297,27 @@ namespace j1939sim
 
     bool J1939Simulation::processReceiveMessage(const ReceiveData &msg)
     {
-        uint8_t dst_addr = msg.id & 0xFF;
+        uint8_t pf = (msg.id >> 16) & 0xFF;
+        uint8_t ps = (msg.id >> 8) & 0xFF;
 
+        // Determine destination address based on PDU format
+        if (((pf < 240) && ps == 0xFF) || pf >= 240) // PDU1 format
+        {
+            return false;
+        }
+
+        uint8_t dst_addr = ps;
         // 检查节点是否可以接收
         if (!node_manager_.canReceive(dst_addr))
         {
             return false;
         }
 
-        auto PF = ((msg.id >> 16) & 0xFF);
-        if (PF == (PGN_TP_CM >> 16))
+        if (pf == (PGN_TP_CM >> 16))
         {
             return handleTPConnectMangement(msg.id, msg.data.data(), msg.data.size());
         }
-        else if (PF == (PGN_TP_DT >> 16))
+        else if (pf == (PGN_TP_DT >> 16))
         {
             return handleTPDataTransfer(msg.id, msg.data.data(), msg.data.size());
         }
@@ -348,7 +374,7 @@ namespace j1939sim
 
                 session->packets_requested = packets_to_request;
                 session->packets_received = 0;
-                return sendCTS(session->src_addr, packets_to_request, session->sequence_number);
+                return sendCTS(session, packets_to_request);
             }
             else
             {
@@ -376,46 +402,40 @@ namespace j1939sim
         TpCmType cmd = static_cast<TpCmType>(data[0]);
         uint32_t pgn = (data[6] << 16) | (data[5] << 8) | (data[4]);
 
-        auto session = session_manager_.findSessionByCanId(id, data);
-        if (!session)
-        {
-            if (cmd == TpCmType::RTS)
-            {
-                uint32_t msg_size = data[1];
-                uint8_t total_packets = data[2];
-
-                session = session_manager_.createSession(src_addr, dst_addr, pgn,
-                                                         priority, SessionRole::RECEIVER);
-                if (!session)
-                {
-                    sendAbort(dst_addr, src_addr, pgn);
-                    return false;
-                }
-
-                session->total_packets = total_packets;
-                session->total_size = msg_size;
-                session->state = SessionState::RECEIVING;
-                session->last_time = std::chrono::steady_clock::now();
-                session->sequence_number = 1;
-
-                auto config = node_manager_.getNodeConfig(dst_addr);
-                if (!config)
-                    return false;
-
-                uint8_t packets_to_request = std::min(
-                    static_cast<uint8_t>(total_packets),
-                    config->max_cts_packets);
-                session->packets_requested = packets_to_request;
-
-                return sendCTS(src_addr, packets_to_request, session->sequence_number);
-            }
-            return false;
-        }
-
         switch (cmd)
         {
+        case TpCmType::RTS:
+        {
+            uint32_t msg_size = data[1];
+            uint8_t total_packets = data[2];
+
+            auto session = session_manager_.createSession(src_addr, dst_addr, pgn, priority, SessionRole::RECEIVER);
+            if (!session)
+            {
+                sendAbort(dst_addr, src_addr, pgn);
+                return false;
+            }
+
+            session->total_packets = total_packets;
+            session->total_size = msg_size;
+            session->state = SessionState::RECEIVING;
+            session->last_time = std::chrono::steady_clock::now();
+            session->sequence_number = 1;
+
+            auto config = node_manager_.getNodeConfig(dst_addr);
+            if (!config)
+                return false;
+
+            uint8_t packets_to_request = std::min(
+                static_cast<uint8_t>(total_packets),
+                config->max_cts_packets);
+            session->packets_requested = packets_to_request;
+
+            return sendCTS(session, packets_to_request);
+        }
         case TpCmType::CTS:
         {
+            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
             if (session->state != SessionState::WAIT_CTS)
             {
                 return false;
@@ -439,17 +459,23 @@ namespace j1939sim
             return true;
         }
         case TpCmType::EndOfMsgAck:
+        {
+            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
             session_manager_.removeSession(session->src_addr,
                                            session->dst_addr,
                                            session->pgn,
                                            SessionRole::SENDER);
             return true;
+        }
         case TpCmType::Abort:
+        {
+            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
             session_manager_.removeSession(session->src_addr,
                                            session->dst_addr,
                                            session->pgn,
                                            session->state == SessionState::WAIT_CTS ? SessionRole::SENDER : SessionRole::RECEIVER);
             return true;
+        }
         default:
             return false;
         }
@@ -504,23 +530,26 @@ namespace j1939sim
     }
 
     // 添加CTS发送函数
-    bool J1939Simulation::sendCTS(uint8_t src_addr, uint8_t num_packets, uint8_t next_packet)
+    bool J1939Simulation::sendCTS(const std::shared_ptr<TransportSession> &session, uint8_t num_packets)
     {
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::CTS),
-            num_packets, // 请求的数据包数量
-            next_packet, // 下一个期望的数据包序号
-            0xFF,
-            0xFF,
-            0xFF,
-            0xFF,
-            0xFF};
+            static_cast<uint8_t>(TpCmType::CTS),               // Control byte = CTS command
+            num_packets,                                       // Number of packets that can be sent
+            session->sequence_number,                          // Next packet number
+            0xFF,                                              // Reserved
+            static_cast<uint8_t>(session->pgn & 0xFF),         // PGN byte 1 (LSB)
+            static_cast<uint8_t>((session->pgn >> 8) & 0xFF),  // PGN byte 2
+            static_cast<uint8_t>((session->pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
+            0xFF                                               // Reserved
+        };
 
-        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | src_addr; // 使用默认优先级7
+        // CTS消息中，本地地址(session->dst_addr)应该在ID的低字节
+        // 目标地址(session->src_addr)应该在PS字段
+        uint32_t id = (session->priority << 26) | (PGN_TP_CM << 8) |
+                      (session->src_addr << 8) | session->dst_addr;
         return transmitter(id, data, 8, context);
     }
 
-    // 修改sendAbort函数实现
     bool J1939Simulation::sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn)
     {
         uint8_t data[8] = {
