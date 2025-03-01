@@ -87,21 +87,13 @@ namespace j1939sim
                                                         SessionRole role,
                                                         std::vector<uint8_t> &&data = std::vector<uint8_t>())
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-
+            // 删除锁,由外层控制并发访问
             SessionId id{src_addr, dst_addr, role, pgn};
 
             auto it = sessions_.find(id);
             if (it != sessions_.end())
             {
-                if (role == SessionRole::RECEIVER)
-                {
-                    sessions_.erase(it);
-                }
-                else
-                {
-                    return nullptr;
-                }
+                sessions_.erase(it);
             }
 
             auto session = std::make_shared<TransportSession>();
@@ -129,7 +121,7 @@ namespace j1939sim
                                                      uint32_t pgn,
                                                      SessionRole role)
         {
-            std::shared_lock<std::shared_mutex> lock(shared_mutex_);
+            // 删除shared_lock
             auto it = sessions_.find(SessionId{addr1, addr2, role, pgn});
             return (it != sessions_.end()) ? it->second : nullptr;
         }
@@ -164,13 +156,11 @@ namespace j1939sim
 
         void removeSession(uint8_t addr1, uint8_t addr2, uint32_t pgn, SessionRole role)
         {
-            std::lock_guard<std::mutex> lock(mutex_);
             sessions_.erase(SessionId{addr1, addr2, role, pgn});
         }
 
         std::vector<SessionId> getReadySessions()
         {
-            std::shared_lock<std::shared_mutex> lock(shared_mutex_);
             std::vector<SessionId> ready_sessions;
             auto now = Clock::now();
             for (const auto &[id, session] : sessions_)
@@ -185,8 +175,7 @@ namespace j1939sim
 
     private:
         std::map<SessionId, std::shared_ptr<TransportSession>> sessions_;
-        mutable std::mutex mutex_;               // 用于写操作的互斥锁
-        mutable std::shared_mutex shared_mutex_; // 用于读写操作的共享互斥锁
+        // 删除mutex_和shared_mutex_
     };
 
 } // namespace j1939sim

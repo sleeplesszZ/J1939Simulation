@@ -319,65 +319,69 @@ namespace j1939sim
         uint8_t src_addr = id & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
 
-        auto session = session_manager_.findActiveReceiveSession(src_addr, dst_addr);
-        if (!session || session->state != SessionState::RECEIVING)
+        std::shared_ptr<TransportSession> session;
         {
-            return false;
-        }
-
-        uint8_t seq = data[0];
-        if (seq != session->sequence_number)
-        {
-            sendAbort(session->src_addr, session->dst_addr, session->pgn);
-            return false;
-        }
-
-        // 保存数据
-        size_t offset = (seq - 1) * 7;
-        size_t remaining = session->total_size - offset;
-        size_t data_length = std::min(remaining, size_t(7));
-
-        // 确保数据缓冲区大小足够
-        if (session->data.size() < offset + data_length)
-        {
-            session->data.resize(offset + data_length);
-        }
-        std::copy_n(data + 1, data_length, session->data.begin() + offset);
-
-        session->sequence_number++;
-        session->packets_received++;
-
-        // 检查是否需要发送下一个CTS
-        if (session->packets_received == session->packets_requested)
-        {
-            if (session->sequence_number <= session->total_packets)
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            session = session_manager_.findActiveReceiveSession(src_addr, dst_addr);
+            if (!session || session->state != SessionState::RECEIVING)
             {
-                // 还有更多包需要接收
-                auto config = node_manager_.getNodeConfig(session->dst_addr);
-                if (!config)
-                    return false;
-
-                uint8_t packets_to_request = std::min(
-                    static_cast<uint8_t>(session->total_packets - session->sequence_number + 1),
-                    config->max_cts_packets);
-
-                session->packets_requested = packets_to_request;
-                session->packets_received = 0;
-                return sendCTS(session, packets_to_request);
+                return false;
             }
-            else
+
+            uint8_t seq = data[0];
+            if (seq != session->sequence_number)
             {
-                // 所有包都已接收完成
-                session->state = SessionState::COMPLETE;
-                bool ack_result = sendEndOfMsgAck(session->src_addr);
+                sendAbort(session->src_addr, session->dst_addr, session->pgn);
+                session_manager_.removeSession(session->src_addr, session->dst_addr, session->pgn, SessionRole::RECEIVER);
+                return false;
+            }
 
-                // 发送完EndOfMsgAck后清理会话
-                session_manager_.removeSession(session->src_addr,
-                                               session->dst_addr,
-                                               session->pgn,
-                                               SessionRole::RECEIVER);
+            // 保存数据
+            size_t offset = (seq - 1) * 7;
+            size_t remaining = session->total_size - offset;
+            size_t data_length = std::min(remaining, size_t(7));
 
-                return ack_result;
+            // 确保数据缓冲区大小足够
+            if (session->data.size() < offset + data_length)
+            {
+                session->data.resize(offset + data_length);
+            }
+            std::copy_n(data + 1, data_length, session->data.begin() + offset);
+
+            session->sequence_number++;
+            session->packets_received++;
+
+            // 检查是否需要发送下一个CTS
+            if (session->packets_received == session->packets_requested)
+            {
+                if (session->sequence_number <= session->total_packets)
+                {
+                    // 还有更多包需要接收
+                    auto config = node_manager_.getNodeConfig(session->dst_addr);
+                    if (!config)
+                    {
+                        session_manager_.removeSession(session->src_addr, session->dst_addr, session->pgn, SessionRole::RECEIVER);
+                        return false;
+                    }
+
+                    uint8_t packets_to_request = std::min(
+                        static_cast<uint8_t>(session->total_packets - session->sequence_number + 1),
+                        config->max_cts_packets);
+
+                    session->packets_requested = packets_to_request;
+                    session->packets_received = 0;
+                    return sendCTS(session, packets_to_request);
+                }
+                else
+                {
+                    // 所有包都已接收完成
+                    session->state = SessionState::COMPLETE;
+                    bool ack_result = sendEndOfMsgAck(session->src_addr);
+
+                    // 发送完EndOfMsgAck后清理会话
+                    session_manager_.removeSession(session->src_addr, session->dst_addr, session->pgn, SessionRole::RECEIVER);
+                    return ack_result;
+                }
             }
         }
         return true;
@@ -391,6 +395,7 @@ namespace j1939sim
         TpCmType cmd = static_cast<TpCmType>(data[0]);
         uint32_t pgn = (data[6] << 16) | (data[5] << 8) | (data[4]);
 
+        std::lock_guard<std::mutex> lock(session_mutex_);
         switch (cmd)
         {
         case TpCmType::RTS:
@@ -425,7 +430,7 @@ namespace j1939sim
         case TpCmType::CTS:
         {
             auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
-            if (session->state != SessionState::WAIT_CTS)
+            if (!session || session->state != SessionState::WAIT_CTS)
             {
                 return false;
             }
@@ -442,9 +447,12 @@ namespace j1939sim
             session->state = SessionState::SENDING;
             session->current_timeout = J1939Timeouts::T3;
             session->last_time = std::chrono::steady_clock::now();
+            session->next_action_time = std::chrono::steady_clock::now() +
+                                        std::chrono::milliseconds(config->tp_packet_interval);
 
-            // 使用节点配置的数据包间隔
-            session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(config->tp_packet_interval));
+            // 更新会话状态后唤醒会话处理线程
+            has_pending_sessions_ = true;
+            session_cv_.notify_one();
             return true;
         }
         case TpCmType::EndOfMsgAck:
