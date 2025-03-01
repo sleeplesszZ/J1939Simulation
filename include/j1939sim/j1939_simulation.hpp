@@ -76,12 +76,7 @@ namespace j1939sim
         bool sendDataPacket(const TransportSession &session, size_t packet_number);
         bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn);
 
-        void processTransportSessions();
-        bool processSession(std::shared_ptr<TransportSession> session);
-        void scheduleNextCheck(std::shared_ptr<TransportSession> session,
-                               std::chrono::milliseconds delay);
-
-        std::unique_ptr<AsyncWorker> worker_;
+        std::thread session_thread_; // Add this line
         TransportSessionManager session_manager_;
         NodeManager node_manager_;
 
@@ -92,7 +87,6 @@ namespace j1939sim
         std::atomic<bool> running_{true};
         std::thread receive_thread_;
 
-        void startReceiveProcessor();
         void processReceiveQueue();
         bool processReceiveMessage(const ReceiveData &msg);
 
@@ -102,8 +96,9 @@ namespace j1939sim
         std::chrono::steady_clock::time_point next_session_check_;
         bool has_pending_sessions_{false};
 
+        void processSessions();
+        bool handleSession(std::shared_ptr<TransportSession> session);
         void checkAndScheduleSessions();
-        void wakeupSessionProcessor();
     };
 
 } // namespace j1939sim

@@ -6,21 +6,27 @@
 namespace j1939sim
 {
 
-    J1939Simulation::J1939Simulation() : worker_(std::make_unique<AsyncWorker>())
+    J1939Simulation::J1939Simulation()
     {
         next_session_check_ = std::chrono::steady_clock::now();
-        // 只提交一次任务，后续通过条件变量控制
-        worker_->submit([this]()
-                        { processTransportSessions(); }, std::chrono::milliseconds(0));
-
+        // 启动会话处理线程
+        session_thread_ = std::thread([this]()
+                                      { processSessions(); });
         // 启动接收消息处理线程
-        startReceiveProcessor();
+        receive_thread_ = std::thread([this]()
+                                      { processReceiveQueue(); });
     }
 
     J1939Simulation::~J1939Simulation()
     {
         running_ = false;
         queue_cv_.notify_one();
+        session_cv_.notify_one();
+
+        if (session_thread_.joinable())
+        {
+            session_thread_.join();
+        }
         if (receive_thread_.joinable())
         {
             receive_thread_.join();
@@ -95,12 +101,16 @@ namespace j1939sim
         session->current_timeout = session->is_bam ? J1939Timeouts::T3 : J1939Timeouts::T2;
 
         // 唤醒会话处理器
-        wakeupSessionProcessor();
+        {
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            has_pending_sessions_ = true;
+        }
+        session_cv_.notify_one();
 
         return session->is_bam ? sendBAM(*session) : sendRTS(*session);
     }
 
-    void J1939Simulation::processTransportSessions()
+    void J1939Simulation::processSessions()
     {
         while (running_)
         {
@@ -136,7 +146,7 @@ namespace j1939sim
 
             if (session && node_manager_.canTransmit(session->src_addr))
             {
-                if (!processSession(session))
+                if (!handleSession(session))
                 {
                     session_manager_.removeSession(session_id.addr1,
                                                    session_id.addr2,
@@ -156,16 +166,7 @@ namespace j1939sim
         next_session_check_ = next_check;
     }
 
-    void J1939Simulation::wakeupSessionProcessor()
-    {
-        {
-            std::lock_guard<std::mutex> lock(session_mutex_);
-            has_pending_sessions_ = true;
-        }
-        session_cv_.notify_one();
-    }
-
-    bool J1939Simulation::processSession(std::shared_ptr<TransportSession> session)
+    bool J1939Simulation::handleSession(std::shared_ptr<TransportSession> session)
     {
         // 获取节点配置以获取发送间隔
         auto config = node_manager_.getNodeConfig(session->src_addr);
@@ -186,7 +187,7 @@ namespace j1939sim
                     // 使用节点配置的数据包间隔
                     std::this_thread::sleep_for(std::chrono::milliseconds(config->tp_packet_interval));
                 }
-                scheduleNextCheck(session, std::chrono::milliseconds(config->tp_packet_interval));
+                session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(config->tp_packet_interval));
                 session->state = SessionState::SENDING;
             }
             return true;
@@ -198,7 +199,7 @@ namespace j1939sim
             {
                 return false;
             }
-            scheduleNextCheck(session, std::chrono::milliseconds(10));
+            session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(10));
             return true;
 
         case SessionState::SENDING:
@@ -213,7 +214,7 @@ namespace j1939sim
                         return false;
                     }
                     // 使用节点配置的数据包间隔
-                    scheduleNextCheck(session, std::chrono::milliseconds(config->tp_packet_interval));
+                    session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(config->tp_packet_interval));
                     return true;
                 }
                 return false; // BAM完成
@@ -221,7 +222,7 @@ namespace j1939sim
             // 对于非BAM消息，等待CTS
             session->current_timeout = J1939Timeouts::T1;
             session->state = SessionState::WAIT_CTS;
-            scheduleNextCheck(session, std::chrono::milliseconds(10));
+            session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(10));
             return true;
 
         case SessionState::WAIT_ACK:
@@ -239,12 +240,6 @@ namespace j1939sim
         }
     }
 
-    void J1939Simulation::scheduleNextCheck(std::shared_ptr<TransportSession> session,
-                                            std::chrono::milliseconds delay)
-    {
-        session->next_action_time = std::chrono::steady_clock::now() + delay;
-    }
-
     bool J1939Simulation::onReceive(const std::vector<ReceiveData> &data_list)
     {
         {
@@ -256,12 +251,6 @@ namespace j1939sim
         }
         queue_cv_.notify_one();
         return true;
-    }
-
-    void J1939Simulation::startReceiveProcessor()
-    {
-        receive_thread_ = std::thread([this]()
-                                      { processReceiveQueue(); });
     }
 
     void J1939Simulation::processReceiveQueue()
@@ -455,7 +444,7 @@ namespace j1939sim
             session->last_time = std::chrono::steady_clock::now();
 
             // 使用节点配置的数据包间隔
-            scheduleNextCheck(session, std::chrono::milliseconds(config->tp_packet_interval));
+            session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(config->tp_packet_interval));
             return true;
         }
         case TpCmType::EndOfMsgAck:
