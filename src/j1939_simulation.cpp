@@ -36,8 +36,8 @@ namespace j1939sim
 
     bool J1939Simulation::transmit(uint32_t id, uint8_t *data, size_t length)
     {
-        uint8_t src_addr = (id >> 8) & 0xFF;
-        uint8_t priority = (id >> 26) & 0x7; // 从输入id中提取优先级
+        uint8_t src_addr = id & 0xFF; // Fix: get source address from LSB
+        uint8_t priority = (id >> 26) & 0x7;
 
         // 检查节点是否可以发送
         if (!node_manager_.canTransmit(src_addr))
@@ -57,7 +57,7 @@ namespace j1939sim
             return transmitter(id, data, length, context);
         }
 
-        uint8_t dst_addr = id & 0xFF;
+        uint8_t dst_addr = (id >> 8) & 0xFF; // Fix: get destination address from byte 1
         uint32_t pgn = id & 0x3FFFF00;
 
         // 使用 std::move 构造数据向量
@@ -457,15 +457,17 @@ namespace j1939sim
 
     bool J1939Simulation::sendRTS(const TransportSession &session)
     {
+        // 按照SAE J1939协议规范构造RTS消息
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::RTS),
-            static_cast<uint8_t>(session.data.size()),
-            static_cast<uint8_t>(session.total_packets),
-            0xFF,
-            static_cast<uint8_t>(session.pgn & 0xFF),
-            static_cast<uint8_t>((session.pgn >> 8) & 0xFF),
-            static_cast<uint8_t>((session.pgn >> 16) & 0xFF),
-            0xFF};
+            static_cast<uint8_t>(TpCmType::RTS),             // Control byte = 16 (RTS)
+            static_cast<uint8_t>(session.data.size()),       // Total message size (LSB)
+            static_cast<uint8_t>(session.data.size() >> 8),  // Total message size (MSB)
+            static_cast<uint8_t>(session.total_packets),     // Total number of packets
+            0xFF,                                            // Maximum number of packets that can be sent (no limit)
+            static_cast<uint8_t>(session.pgn & 0xFF),        // PGN byte 1 (LSB)
+            static_cast<uint8_t>((session.pgn >> 8) & 0xFF), // PGN byte 2
+            static_cast<uint8_t>((session.pgn >> 16) & 0xFF) // PGN byte 3 (MSB)
+        };
 
         uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | session.dst_addr;
         return transmitter(id, data, 8, context);
