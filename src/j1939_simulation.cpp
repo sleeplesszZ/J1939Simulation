@@ -313,7 +313,7 @@ namespace j1939sim
         uint8_t seq = data[0];
         if (seq != session->sequence_number)
         {
-            sendAbort(session->src_addr, session->dst_addr, session->pgn, AbortReason::BAD_SEQUENCE);
+            sendAbort(session->src_addr, session->dst_addr, session->pgn);
             return false;
         }
 
@@ -388,7 +388,7 @@ namespace j1939sim
                                                          priority, SessionRole::RECEIVER);
                 if (!session)
                 {
-                    sendAbort(dst_addr, src_addr, pgn, AbortReason::NO_RESOURCES);
+                    sendAbort(dst_addr, src_addr, pgn);
                     return false;
                 }
 
@@ -518,20 +518,20 @@ namespace j1939sim
         return transmitter(id, data, 8, context);
     }
 
-    // 添加缺失的abort发送函数
-    bool J1939Simulation::sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn, AbortReason reason)
+    // 修改sendAbort函数实现
+    bool J1939Simulation::sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn)
     {
         uint8_t data[8] = {
             static_cast<uint8_t>(TpCmType::Abort),
-            static_cast<uint8_t>(reason),
-            0xFF,
-            0xFF,
+            0xFF, // Reserved for assignment by SAE
+            0xFF, // Reserved for assignment by SAE
+            0xFF, // Reserved for assignment by SAE
             static_cast<uint8_t>(pgn & 0xFF),
             static_cast<uint8_t>((pgn >> 8) & 0xFF),
             static_cast<uint8_t>((pgn >> 16) & 0xFF),
             0xFF};
 
-        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | dst_addr; // 使用默认优先级7
+        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | dst_addr;
         return transmitter(id, data, 8, context);
     }
 

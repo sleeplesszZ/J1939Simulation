@@ -27,15 +27,7 @@ namespace j1939sim
         Abort = 255
     };
 
-    // 终止原因
-    enum class AbortReason : uint8_t
-    {
-        NO_RESOURCES = 1,
-        TIMEOUT = 2,
-        ALREADY_IN_PROCESS = 3,
-        SYSTEM_ERROR = 4,
-        BAD_SEQUENCE = 5
-    };
+    // 删除 AbortReason 枚举类型
 
 } // namespace j1939sim
 

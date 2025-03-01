@@ -74,7 +74,7 @@ namespace j1939sim
         bool sendEndOfMsgAck(uint8_t src_addr);
         bool sendBAM(const TransportSession &session);
         bool sendDataPacket(const TransportSession &session, size_t packet_number);
-        bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn, AbortReason reason);
+        bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn);
 
         void processTransportSessions();
         bool processSession(std::shared_ptr<TransportSession> session);
