@@ -68,7 +68,7 @@ namespace j1939sim
         size_t packets_requested{0}; // 当前CTS请求的数据包数
 
         // 状态控制
-        SessionState state{SessionState::INIT};
+        SessionState state{SessionState::WAIT_CTS}; // 修改默认状态
         std::chrono::steady_clock::time_point last_time;
         std::chrono::steady_clock::time_point next_action_time;
         uint32_t current_timeout{J1939Timeouts::T2};
@@ -126,34 +126,6 @@ namespace j1939sim
             return (it != sessions_.end()) ? it->second : nullptr;
         }
 
-        // 根据CAN ID获取会话，自动处理发送和接收两种情况
-        std::shared_ptr<TransportSession> findSessionByCanId(uint32_t id, const uint8_t *data)
-        {
-            uint8_t src_addr = id & 0xFF;
-            uint8_t dst_addr = (id >> 8) & 0xFF;
-
-            // 从消息数据中提取PGN
-            uint32_t pgn = (data[6] << 16) | (data[5] << 8) | data[4];
-
-            // 根据消息类型判断是发送方还是接收方会话
-            TpCmType cmd = static_cast<TpCmType>(data[0]);
-            switch (cmd)
-            {
-            case TpCmType::RTS:
-            case TpCmType::BAM:
-                // 作为接收方查找会话
-                return getSession(src_addr, dst_addr, pgn, SessionRole::RECEIVER);
-
-            case TpCmType::CTS:
-            case TpCmType::EndOfMsgAck:
-                // 作为发送方查找会话
-                return getSession(dst_addr, src_addr, pgn, SessionRole::SENDER);
-
-            default:
-                return nullptr;
-            }
-        }
-
         void removeSession(uint8_t addr1, uint8_t addr2, uint32_t pgn, SessionRole role)
         {
             sessions_.erase(SessionId{addr1, addr2, role, pgn});
@@ -171,6 +143,98 @@ namespace j1939sim
                 }
             }
             return ready_sessions;
+        }
+
+        std::shared_ptr<TransportSession> findActiveReceiveSession(uint8_t src_addr, uint8_t dst_addr, uint32_t pgn)
+        {
+            for (const auto &[id, session] : sessions_)
+            {
+                if (id.role == SessionRole::RECEIVER &&
+                    session->src_addr == src_addr &&
+                    session->dst_addr == dst_addr &&
+                    session->pgn == pgn && // Also match PGN
+                    session->state == SessionState::RECEIVING)
+                {
+                    return session;
+                }
+            }
+            return nullptr;
+        }
+
+        bool hasActiveSession(uint8_t dst_addr) const
+        {
+            // Check if destination address already has any active sessions
+            for (const auto &[id, session] : sessions_)
+            {
+                if (session->dst_addr == dst_addr &&
+                    session->state != SessionState::COMPLETE)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool hasActiveSessionFromSource(uint8_t src_addr, uint8_t dst_addr) const
+        {
+            // Check if there's already an active session between these addresses
+            for (const auto &[id, session] : sessions_)
+            {
+                if (session->src_addr == src_addr &&
+                    session->dst_addr == dst_addr &&
+                    session->state != SessionState::COMPLETE)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool hasActiveDestinationSpecificSession(uint8_t src_addr, uint8_t dst_addr) const
+        {
+            // Check if there's already a destination-specific session between these addresses
+            for (const auto &[id, session] : sessions_)
+            {
+                if (session->src_addr == src_addr &&
+                    session->dst_addr == dst_addr &&
+                    !session->is_bam && // Only check non-BAM sessions
+                    session->state != SessionState::COMPLETE)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool hasActiveBamSession(uint8_t src_addr) const
+        {
+            // Check if source address already has any active BAM sessions
+            for (const auto &[id, session] : sessions_)
+            {
+                if (session->src_addr == src_addr &&
+                    session->is_bam &&
+                    session->state != SessionState::COMPLETE)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::vector<std::shared_ptr<TransportSession>> findActiveReceiveSessions(uint8_t src_addr, uint8_t dst_addr)
+        {
+            std::vector<std::shared_ptr<TransportSession>> active_sessions;
+            for (const auto &[id, session] : sessions_)
+            {
+                if (id.role == SessionRole::RECEIVER &&
+                    session->src_addr == src_addr &&
+                    session->dst_addr == dst_addr &&
+                    session->state == SessionState::RECEIVING)
+                {
+                    active_sessions.push_back(session);
+                }
+            }
+            return active_sessions;
         }
 
     private:

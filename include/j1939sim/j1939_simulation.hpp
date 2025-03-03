@@ -71,10 +71,10 @@ namespace j1939sim
         bool handleTPConnectMangement(uint32_t id, const uint8_t *data, size_t length);
         bool sendRTS(const TransportSession &session);
         bool sendCTS(const std::shared_ptr<TransportSession> &session, uint8_t num_packets);
-        bool sendEndOfMsgAck(uint8_t src_addr);
+        bool sendEndOfMsgAck(uint8_t src_addr, const TransportSession &session);
         bool sendBAM(const TransportSession &session);
         bool sendDataPacket(const TransportSession &session, size_t packet_number);
-        bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn);
+        bool sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn, AbortReason reason);
 
         std::thread session_thread_; // Add this line
         TransportSessionManager session_manager_;
