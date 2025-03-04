@@ -6,6 +6,16 @@
 namespace j1939sim
 {
 
+    namespace J1939Timeouts
+    {
+        constexpr uint32_t T1 = 750;  // Time between CTS messages received from the destination (ms)
+        constexpr uint32_t T2 = 1250; // Time between RTS and first CTS received (ms)
+        constexpr uint32_t T3 = 1250; // Time limit for receiver to send next CTS (ms)
+        constexpr uint32_t T4 = 1050; // Time between last data packet and EndOfMsgAck (ms)
+        constexpr uint32_t Tr = 200;  // Time between data packets received (ms)
+        constexpr uint32_t Th = 500;  // Time to hold unused connection resources (ms)
+    }
+
     // 会话状态
     enum class SessionState
     {

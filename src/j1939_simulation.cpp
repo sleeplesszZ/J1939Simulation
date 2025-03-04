@@ -40,20 +40,26 @@ namespace j1939sim
         return true;
     }
 
+    void J1939Simulation::setNodeParams(uint8_t addr, const NodeConfig &config)
+    {
+        std::lock_guard<std::mutex> lock(node_mutex_);
+        nodes_[addr] = config;
+    }
+
+    NodeConfig J1939Simulation::getNodeConfig(uint8_t address)
+    {
+        std::lock_guard<std::mutex> lock(node_mutex_);
+        return nodes_[address];
+    }
+
     bool J1939Simulation::transmit(uint32_t id, uint8_t *data, size_t length)
     {
         uint8_t src_addr = id & 0xFF; // Fix: get source address from LSB
         uint8_t priority = (id >> 26) & 0x7;
 
         // 检查节点是否可以发送
-        if (!node_manager_.canTransmit(src_addr))
-        {
-            return false;
-        }
-
-        // 获取节点配置
-        NodeConfig *config = node_manager_.getNodeConfig(src_addr);
-        if (!config)
+        auto config = getNodeConfig(src_addr);
+        if (!config.active || !config.enable_tx)
         {
             return false;
         }
@@ -64,10 +70,11 @@ namespace j1939sim
         }
 
         // 从 CAN ID 中提取各个字段
-        uint8_t edp = (id >> 24) & 0x1; // Extended Data Page
-        uint8_t dp = (id >> 25) & 0x1;  // Data Page
-        uint8_t pf = (id >> 16) & 0xFF; // PDU Format
-        uint8_t ps = (id >> 8) & 0xFF;  // PDU Specific
+        uint8_t priority = (id >> 26) & 0x7; // 优先级
+        uint8_t edp = (id >> 24) & 0x1;      // Extended Data Page
+        uint8_t dp = (id >> 25) & 0x1;       // Data Page
+        uint8_t pf = (id >> 16) & 0xFF;      // PDU Format
+        uint8_t ps = (id >> 8) & 0xFF;       // PDU Specific
 
         uint32_t pgn;
         uint8_t dst_addr;
@@ -85,54 +92,42 @@ namespace j1939sim
             dst_addr = 0xFF; // PDU2 messages are always destination specific
         }
 
-        // Check BAM restrictions before creating session
-        if (dst_addr == 0xFF && session_manager_.hasActiveBamSession(src_addr))
+        bool result = false;
+        SessionId sid{src_addr, dst_addr, SessionRole::SENDER};
         {
-            // Only one BAM session allowed per source
-            return false;
-        }
-
-        // 使用 std::move 构造数据向量
-        std::vector<uint8_t> data_vec(data, data + length);
-
-        // 创建新的发送会话，使用 std::move 转移数据所有权
-        auto session = session_manager_.createSession(src_addr, dst_addr, pgn,
-                                                      priority, SessionRole::SENDER,
-                                                      std::move(data_vec));
-        if (!session)
-        {
-            return false;
-        }
-
-        bool result;
-        if (session->is_bam)
-        {
-            result = sendBAM(*session);
-            if (result)
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            auto it = sessions_.find(sid);
+            if (it != sessions_.end())
+            {
+                return false;
+            }
+            // 创建新的会话
+            auto session = std::make_shared<TransportSession>();
+            session->src_addr = src_addr;
+            session->dst_addr = dst_addr;
+            session->pgn = pgn;
+            session->priority = priority;
+            session->data.assign(data, data + length);
+            session->total_packets = (length + 6) / 7;
+            if (dst_addr == 0xFF)
             {
                 session->state = SessionState::SENDING;
-                session->current_timeout = J1939Timeouts::T3;
-                // BAM延时设置为最小值50ms
                 session->next_action_time = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(50);
+                                            std::chrono::milliseconds(config.tp_packet_interval);
+                result = sendBAM(priority, src_addr, session->data.size(), session->total_packets, pgn);
             }
-        }
-        else
-        {
-            result = sendRTS(*session);
-            if (result)
+            else
             {
                 session->state = SessionState::WAIT_CTS;
-                session->current_timeout = J1939Timeouts::T3;
                 session->next_action_time = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(J1939Timeouts::T3);
+                                            std::chrono::milliseconds(J1939Timeouts::T1);
+                result = sendRTS(priority, src_addr, dst_addr, session->data.size(), session->total_packets, pgn);
             }
+            has_pending_sessions_ = true;
         }
 
         if (result)
         {
-            std::lock_guard<std::mutex> lock(session_mutex_);
-            has_pending_sessions_ = true;
             session_cv_.notify_one();
         }
 
@@ -155,82 +150,83 @@ namespace j1939sim
                 break;
             }
 
-            checkAndScheduleSessions();
-        }
-    }
-
-    void J1939Simulation::checkAndScheduleSessions()
-    {
-        auto ready_sessions = session_manager_.getReadySessions();
-        std::chrono::steady_clock::time_point next_check =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(1000); // 默认1秒后检查
-
-        for (const auto &session_id : ready_sessions)
-        {
-            auto session = session_manager_.getSession(session_id.addr1,
-                                                       session_id.addr2,
-                                                       session_id.pgn,
-                                                       session_id.role);
-
-            if (session && node_manager_.canTransmit(session->src_addr))
+            std::chrono::steady_clock::time_point next_check =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(1000); // 默认1秒后检查
+            auto it = sessions_.begin();
+            while (it != sessions_.end())
             {
-                if (!handleSession(session))
+                auto session = it->second;
+                if (!session)
                 {
-                    session_manager_.removeSession(session_id.addr1,
-                                                   session_id.addr2,
-                                                   session_id.pgn,
-                                                   session_id.role);
+                    it = sessions_.erase(it);
+                    continue;
+                }
+
+                if (now < session->next_action_time)
+                {
+                    it++;
+                    continue;
+                }
+
+                NodeConfig config;
+                if (it->first.role == SessionRole::RECEIVER)
+                {
+                    config = getNodeConfig(session->dst_addr);
+                    if (config.active || !config.enable_rx)
+                    {
+                        it++;
+                        continue;
+                    }
                 }
                 else
                 {
-                    // 更新下一次检查时间
-                    next_check = std::min(next_check, session->next_action_time);
+                    config = getNodeConfig(session->src_addr);
+                    if (!config.active || !config.enable_tx)
+                    {
+                        it++;
+                        continue;
+                    }
                 }
+                if (!handleSession(session, config))
+                {
+                    it = sessions_.erase(it);
+                    continue;
+                }
+                // 更新下一次检查时间
+                next_check = std::min(next_check, session->next_action_time);
+                it++;
             }
-        }
 
-        has_pending_sessions_ = false;
-        next_session_check_ = next_check;
+            has_pending_sessions_ = false;
+            next_session_check_ = next_check;
+        }
     }
 
-    bool J1939Simulation::handleSession(std::shared_ptr<TransportSession> session)
+    bool J1939Simulation::handleSession(std::shared_ptr<TransportSession> session, const NodeConfig &config)
     {
-        auto config = node_manager_.getNodeConfig(session->src_addr);
-        if (!config)
-            return false;
-
         switch (session->state)
         {
         case SessionState::WAIT_CTS:
-            // 检查超时
-            if (std::chrono::steady_clock::now() - session->last_time >
-                std::chrono::milliseconds(session->current_timeout))
-            {
-                sendAbort(session->dst_addr, session->src_addr, session->pgn, AbortReason::TIMEOUT); // 超时
-                return false;
-            }
-            return true;
-
+            sendAbort(session->dst_addr, session->src_addr, session->pgn, AbortReason::TIMEOUT); // 超时
+            return false;
         case SessionState::SENDING:
             if (session->is_bam)
             {
-                // BAM发送使用T3超时
-                session->current_timeout = J1939Timeouts::T3;
                 if (session->sequence_number <= session->total_packets)
                 {
                     if (!sendDataPacket(*session, session->sequence_number++))
                     {
                         return false;
                     }
+                    // 设置下一个数据包的发送时间
                     session->next_action_time = std::chrono::steady_clock::now() +
-                                                std::chrono::milliseconds(50);
+                                                std::chrono::milliseconds(config.tp_packet_interval);
                     return true;
                 }
                 session->state = SessionState::COMPLETE; // 直接进入完成状态
                 return false;                            // BAM完成
             }
             // 对于非BAM消息，等待CTS
-            session->current_timeout = J1939Timeouts::T1;
             session->state = SessionState::WAIT_CTS;
             session->next_action_time = std::chrono::steady_clock::now() +
                                         std::chrono::milliseconds(10);
@@ -556,21 +552,20 @@ namespace j1939sim
         }
     }
 
-    bool J1939Simulation::sendRTS(const TransportSession &session)
+    bool J1939Simulation::sendRTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint32_t size, uint8_t total_packets, uint32_t pgn)
     {
-        // 按照SAE J1939协议规范构造RTS消息
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::RTS),             // Control byte = 16 (RTS)
-            static_cast<uint8_t>(session.data.size()),       // Total message size (LSB)
-            static_cast<uint8_t>(session.data.size() >> 8),  // Total message size (MSB)
-            static_cast<uint8_t>(session.total_packets),     // Total number of packets
-            0xFF,                                            // Maximum number of packets that can be sent (no limit)
-            static_cast<uint8_t>(session.pgn & 0xFF),        // PGN byte 1 (LSB)
-            static_cast<uint8_t>((session.pgn >> 8) & 0xFF), // PGN byte 2
-            static_cast<uint8_t>((session.pgn >> 16) & 0xFF) // PGN byte 3 (MSB)
+            static_cast<uint8_t>(TpCmType::RTS),      // Control byte = 16 (RTS)
+            static_cast<uint8_t>(size & 0xFF),        // Total message size LSB
+            static_cast<uint8_t>((size >> 8) & 0xFF), // Total message size MSB
+            total_packets,                            // Total number of packets
+            0xFF,                                     // Maximum number of packets that can be sent (no limit)
+            static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF)  // PGN byte 3 (MSB)
         };
 
-        uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | session.dst_addr;
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | dst_addr;
         return transmitter(id, data, 8, context);
     }
 
@@ -587,6 +582,23 @@ namespace j1939sim
             0xFF};
 
         uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | 0xFF;
+        return transmitter(id, data, 8, context);
+    }
+
+    bool J1939Simulation::sendBAM(uint8_t priority, uint8_t src_addr, uint32_t size, uint8_t total_packets, uint32_t pgn)
+    {
+        uint8_t data[8] = {
+            static_cast<uint8_t>(TpCmType::BAM),      // Control byte = 32 (BAM)
+            static_cast<uint8_t>(size & 0xFF),        // Total message size LSB
+            static_cast<uint8_t>((size >> 8) & 0xFF), // Total message size MSB
+            total_packets,                            // Total number of packets
+            static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
+            0xFF                                      // Reserved
+        };
+
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | 0xFF; // BAM always broadcasts (0xFF)
         return transmitter(id, data, 8, context);
     }
 
@@ -657,6 +669,25 @@ namespace j1939sim
             0xFF};
 
         uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | dst_addr;
+        return transmitter(id, data, 8, context);
+    }
+
+    bool J1939Simulation::sendCTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint8_t num_packets, uint8_t next_packet, uint32_t pgn)
+    {
+        uint8_t data[8] = {
+            static_cast<uint8_t>(TpCmType::CTS),      // Control byte = 17 (CTS)
+            num_packets,                              // Number of packets that can be sent
+            next_packet,                              // Next packet number to be sent
+            0xFF,                                     // Reserved
+            static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
+            0xFF                                      // Reserved
+        };
+
+        // CTS消息中，本地地址(dst_addr)应该在ID的低字节
+        // 目标地址(src_addr)应该在PS字段
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr;
         return transmitter(id, data, 8, context);
     }
 
