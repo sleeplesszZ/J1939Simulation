@@ -54,9 +54,7 @@ namespace j1939sim
 
     bool J1939Simulation::transmit(uint32_t id, uint8_t *data, size_t length)
     {
-        uint8_t src_addr = id & 0xFF; // Fix: get source address from LSB
-        uint8_t priority = (id >> 26) & 0x7;
-
+        uint8_t src_addr = id & 0xFF;
         // 检查节点是否可以发送
         auto config = getNodeConfig(src_addr);
         if (!config.active || !config.enable_tx)
@@ -150,8 +148,9 @@ namespace j1939sim
                 break;
             }
 
+            now = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point next_check =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(1000); // 默认1秒后检查
+                now + std::chrono::milliseconds(1000); // 默认1秒后检查
             auto it = sessions_.begin();
             while (it != sessions_.end())
             {
@@ -210,7 +209,9 @@ namespace j1939sim
             sendAbort(session->dst_addr, session->src_addr, session->pgn, AbortReason::TIMEOUT); // 超时
             return false;
         case SessionState::SENDING:
-            if (session->is_bam)
+        {
+            // 广播消息
+            if (session->dst_addr == 0xFF)
             {
                 if (session->sequence_number <= session->total_packets)
                 {
@@ -231,7 +232,7 @@ namespace j1939sim
             session->next_action_time = std::chrono::steady_clock::now() +
                                         std::chrono::milliseconds(10);
             return true;
-
+        }
         case SessionState::RECEIVING:
         case SessionState::COMPLETE:
             return false;
@@ -298,7 +299,8 @@ namespace j1939sim
 
         uint8_t dst_addr = ps;
         // 检查节点是否可以接收
-        if (!node_manager_.canReceive(dst_addr))
+        NodeConfig config = getNodeConfig(dst_addr);
+        if (!config.active || !config.enable_rx)
         {
             return false;
         }
@@ -418,68 +420,92 @@ namespace j1939sim
         uint32_t pgn = (data[6] << 16) | (data[5] << 8) | (data[4]);
         bool is_broadcast = (dst_addr == 0xFF); // 添加变量定义
 
-        std::lock_guard<std::mutex> lock(session_mutex_);
+        auto config = getNodeConfig(dst_addr);
+        if (!config.active || !config.enable_rx)
+        {
+            return false;
+        }
+
         switch (cmd)
         {
         case TpCmType::RTS:
         {
-            // Check if destination already has an active session
-            if (session_manager_.hasActiveSession(dst_addr))
-            {
-                sendAbort(dst_addr, src_addr, pgn, AbortReason::RESOURCES_BUSY); // 资源被占用
-                return false;
-            }
-
-            // Check if there's already a destination-specific session from this source
-            if (!is_broadcast && session_manager_.hasActiveDestinationSpecificSession(src_addr, dst_addr))
-            {
-                sendAbort(dst_addr, src_addr, pgn, AbortReason::RESOURCES_BUSY); // 资源被占用
-                return false;
-            }
-
-            // Check if node can handle another session
-            auto config = node_manager_.getNodeConfig(dst_addr);
-            if (!config || !node_manager_.canReceive(dst_addr))
-            {
-                sendAbort(dst_addr, src_addr, pgn, AbortReason::NO_RESOURCES); // 无可用资源
-                return false;
-            }
-
+            std::lock_guard<std::mutex> lock(session_mutex_);
             uint32_t msg_size = data[1];
             uint8_t total_packets = data[2];
+            auto sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
 
-            auto session = session_manager_.createSession(src_addr, dst_addr, pgn, priority, SessionRole::RECEIVER);
+            auto it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                // 创建新会话
+                auto session = std::make_shared<TransportSession>();
+                session->priority = priority;
+                session->pgn = pgn;
+                session->src_addr = src_addr;
+                session->dst_addr = dst_addr;
+                session->total_packets = total_packets;
+                session->sequence_number = 1;
+                session->total_size = msg_size;
+                session->packets_received = 0;
+                uint8_t packets_to_request = std::min(
+                    static_cast<uint8_t>(total_packets),
+                    config.max_cts_packets);
+                session->packets_requested = packets_to_request;
+                session->state = SessionState::RECEIVING;
+                session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
+                sessions_[sid] = session;
+                return sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
+            }
+            auto session = sessions_[sid];
             if (!session)
             {
-                sendAbort(dst_addr, src_addr, pgn, AbortReason::NO_RESOURCES); // 无可用资源
+                sessions_.erase(it);
+                return false;
+            }
+            // 已存在相同的会话，但PGN不同
+            if (pgn != session->pgn)
+            {
+                sendAbort(dst_addr, src_addr, pgn, AbortReason::INCOMPLETE_TRANSFER); // 未完成的传输
                 return false;
             }
 
+            // 已存在相同的会话，PGN相同，使用最新RTS，无需发送abort
+            session->priority = priority;
+            session->pgn = pgn;
+            session->src_addr = src_addr;
+            session->dst_addr = dst_addr;
             session->total_packets = total_packets;
-            session->total_size = msg_size;
-            session->state = SessionState::RECEIVING;
-            session->last_time = std::chrono::steady_clock::now();
             session->sequence_number = 1;
-
-            // 删除重复的config声明，使用上面已声明的config
+            session->total_size = msg_size;
+            session->packets_received = 0;
             uint8_t packets_to_request = std::min(
                 static_cast<uint8_t>(total_packets),
-                config->max_cts_packets);
+                config.max_cts_packets);
             session->packets_requested = packets_to_request;
-
-            return sendCTS(session, packets_to_request);
+            session->state = SessionState::RECEIVING;
+            session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
+            return sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
         }
         case TpCmType::CTS:
         {
-            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            auto sid = SessionId{dst_addr, src_addr, SessionRole::SENDER};
+            auto it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
+            auto session = sessions_[sid];
+            if (!session)
+            {
+                sessions_.erase(it);
+                return false;
+            }
             if (session->state != SessionState::WAIT_CTS)
             {
                 return false;
             }
-
-            auto config = node_manager_.getNodeConfig(session->src_addr);
-            if (!config)
-                return false;
 
             uint8_t num_packets = data[1];
             uint8_t next_packet = data[2];
@@ -487,12 +513,8 @@ namespace j1939sim
             session->packets_requested = num_packets;
             session->sequence_number = next_packet;
             session->state = SessionState::SENDING;
-            session->current_timeout = J1939Timeouts::T3;
-            session->last_time = std::chrono::steady_clock::now();
-
-            // 使用节点配置的数据包间隔
             session->next_action_time = std::chrono::steady_clock::now() +
-                                        std::chrono::milliseconds(config->tp_packet_interval);
+                                        std::chrono::milliseconds(config.tp_packet_interval);
             return true;
         }
         case TpCmType::EndOfMsgAck:

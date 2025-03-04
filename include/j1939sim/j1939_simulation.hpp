@@ -65,7 +65,6 @@ namespace j1939sim
         uint8_t dst_addr{0};
         uint32_t pgn{0};
         uint8_t priority{7}; // 添加优先级字段，默认为7
-        bool is_bam{false};
 
         // 数据管理
         std::vector<uint8_t> data;
