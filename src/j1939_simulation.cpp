@@ -215,7 +215,6 @@ namespace j1939sim
             {
                 if (session->sequence_number <= session->total_packets)
                 {
-                    // 修改这里：使用新的sendDataPacket函数签名
                     if (!sendDataPacket(session->priority, session->src_addr,
                                         session->dst_addr, session->sequence_number++,
                                         session->data))
@@ -227,15 +226,34 @@ namespace j1939sim
                                                 std::chrono::milliseconds(config.tp_packet_interval);
                     return true;
                 }
-                session->state = SessionState::COMPLETE; // 直接进入完成状态
-                return false;                            // BAM完成
+                return false; // BAM完成
             }
-            // 对于非BAM消息，等待CTS
-            session->state = SessionState::WAIT_CTS;
-            session->next_action_time = std::chrono::steady_clock::now() +
-                                        std::chrono::milliseconds(10);
+
+            // 点对点传输
+            if (session->sequence_number <= session->total_packets &&
+                session->sequence_number <= session->sequence_number - 1 + config.max_cts_packets)
+            {
+                if (!sendDataPacket(session->priority, session->src_addr,
+                                    session->dst_addr, session->sequence_number++,
+                                    session->data))
+                {
+                    return false;
+                }
+                session->next_action_time = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(config.tp_packet_interval);
+                return true;
+            }
+
+            // 完成当前CTS请求的数据包发送后
+            if (session->sequence_number < session->total_packets)
+            {
+                session->state = SessionState::WAIT_CTS;
+                session->next_action_time = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(J1939Timeouts::T3);
+            }
             return true;
         }
+
         case SessionState::RECEIVING:
         case SessionState::COMPLETE:
             return false;
@@ -310,7 +328,7 @@ namespace j1939sim
 
         if (pf == (PGN_TP_CM >> 16))
         {
-            return handleTPConnectMangement(msg.id, msg.data.data(), msg.data.size());
+            return handleTPConnectManagement(msg.id, msg.data.data(), msg.data.size());
         }
         else if (pf == (PGN_TP_DT >> 16))
         {
@@ -405,7 +423,7 @@ namespace j1939sim
         return true;
     }
 
-    bool J1939Simulation::handleTPConnectMangement(uint32_t id, const uint8_t *data, size_t length)
+    bool J1939Simulation::handleTPConnectManagement(uint32_t id, const uint8_t *data, size_t length)
     {
         auto pf = (id >> 16) & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
@@ -603,8 +621,7 @@ namespace j1939sim
             total_packets,                                  // Total number of packets
             static_cast<uint8_t>(pgn & 0xFF),               // PGN byte 1 (LSB)
             static_cast<uint8_t>((pgn >> 8) & 0xFF),        // PGN byte 2
-            static_cast<uint8_t>((pgn >> 16) & 0xFF),       // PGN byte 3 (MSB)
-            0xFF                                            // Reserved
+            static_cast<uint8_t>((pgn >> 16) & 0xFF)        // PGN byte 3 (MSB)
         };
 
         uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | 0xFF; // BAM always broadcasts (0xFF)
