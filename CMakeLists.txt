@@ -17,7 +17,7 @@ target_include_directories(j1939sim
 )
 
 # Build examples if requested
-option(BUILD_EXAMPLES "Build examples" ON)
+option(BUILD_EXAMPLES "Build examples" OFF)
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
@@ -28,11 +28,10 @@ install(TARGETS j1939sim
     RUNTIME DESTINATION bin
 )
 
+# 更新安装文件列表，移除不存在的头文件
 install(FILES 
     include/j1939sim/j1939_sim.h
     include/j1939sim/j1939_simulation.hpp
-    include/j1939sim/node_config.hpp
-    include/j1939sim/transport_session_manager.hpp
-    include/j1939sim/async_worker.hpp
+    include/j1939sim/j1939_types.hpp
     DESTINATION include/j1939sim
 )
