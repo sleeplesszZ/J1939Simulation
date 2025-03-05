@@ -413,8 +413,14 @@ namespace j1939sim
 
     bool J1939Simulation::handleTPConnectMangement(uint32_t id, const uint8_t *data, size_t length)
     {
-        uint8_t src_addr = id & 0xFF;
+        auto pf = (id >> 16) & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
+        if ((pf > 240) || (pf < 240 && dst_addr != 0xFF))
+        {
+            // 广播消息无需处理
+            return false;
+        }
+        uint8_t src_addr = id & 0xFF;
         uint8_t priority = (id >> 26) & 0x7;
         TpCmType cmd = static_cast<TpCmType>(data[0]);
         uint32_t pgn = (data[6] << 16) | (data[5] << 8) | (data[4]);
@@ -519,54 +525,46 @@ namespace j1939sim
         }
         case TpCmType::EndOfMsgAck:
         {
-            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
-            session_manager_.removeSession(session->src_addr,
-                                           session->dst_addr,
-                                           session->pgn,
-                                           SessionRole::SENDER);
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            auto sid = SessionId{dst_addr, src_addr, SessionRole::SENDER};
+            auto it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
             return true;
         }
         case TpCmType::Abort:
         {
-            auto session = session_manager_.getSession(src_addr, dst_addr, pgn, SessionRole::SENDER);
-            session_manager_.removeSession(session->src_addr,
-                                           session->dst_addr,
-                                           session->pgn,
-                                           session->state == SessionState::WAIT_CTS ? SessionRole::SENDER : SessionRole::RECEIVER);
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            auto sid = SessionId{dst_addr, src_addr, SessionRole::SENDER};
+            auto it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
+            sid = SessionId{dst_addr, src_addr, SessionRole::RECEIVER};
+            it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
+            sid = SessionId{src_addr, dst_addr, SessionRole::SENDER};
+            it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
+            sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
+            it = sessions_.find(sid);
+            if (it == sessions_.end())
+            {
+                return false;
+            }
             return true;
         }
         case TpCmType::BAM:
         {
-            if (!is_broadcast)
-            {
-                // BAM must be broadcast
-                return false;
-            }
-
-            // For BAM, check if source already has an active BAM session
-            if (session_manager_.hasActiveBamSession(src_addr))
-            {
-                // Silently ignore BAM if source already has active BAM
-                return false;
-            }
-
-            uint32_t msg_size = data[1];
-            uint8_t total_packets = data[2];
-
-            auto session = session_manager_.createSession(src_addr, dst_addr, pgn,
-                                                          priority, SessionRole::RECEIVER);
-            if (!session)
-            {
-                return false;
-            }
-
-            session->total_packets = total_packets;
-            session->total_size = msg_size;
-            session->state = SessionState::RECEIVING;
-            session->last_time = std::chrono::steady_clock::now();
-            session->sequence_number = 1;
-            session->is_bam = true;
-
             return true;
         }
         default:
