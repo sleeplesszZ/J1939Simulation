@@ -35,6 +35,7 @@ namespace j1939sim
         bool active{true};               // 节点是否激活
         uint32_t tp_packet_interval{50}; // 传输协议数据包间隔(毫秒)
         uint8_t max_cts_packets{8};      // 单次CTS请求的最大数据包数, 默认8
+        uint8_t max_rts_packets{0xFF};   // RTS报文中允许的最大数据包数，默认0xFF表示无限制
     };
 
     // 添加角色标识
@@ -75,6 +76,8 @@ namespace j1939sim
         uint32_t total_size{0};      // 总数据大小
         size_t packets_received{0};  // 已接收的数据包数
         size_t packets_requested{0}; // 当前CTS请求的数据包数
+
+        uint8_t rts_max_packets{0xFF}; // RTS中指定的最大包数限制
 
         // 状态控制
         SessionState state{SessionState::WAIT_CTS};

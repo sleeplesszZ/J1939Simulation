@@ -374,7 +374,11 @@ namespace j1939sim
             // 计算剩余需要接收的数据包数量
             uint8_t remaining_packets = session->total_packets - session->packets_received;
             auto config = getNodeConfig(dst_addr);
-            uint8_t packets_to_request = std::min(remaining_packets, config.max_cts_packets);
+            uint8_t packets_to_request = std::min({
+                remaining_packets,       // 不超过剩余包数
+                config.max_cts_packets,  // 不超过本地CTS限制
+                session->rts_max_packets // 不超过发送方指定的限制
+            });
 
             // 发送CTS请求下一组数据包
             session->packets_requested += packets_to_request;
@@ -429,6 +433,7 @@ namespace j1939sim
             std::lock_guard<std::mutex> lock(session_mutex_);
             uint32_t msg_size = data[1];
             uint8_t total_packets = data[2];
+            uint8_t rts_max_packets = data[4]; // 获取RTS中的最大包数限制
             auto sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
 
             auto it = sessions_.find(sid);
@@ -444,15 +449,19 @@ namespace j1939sim
                 session->sequence_number = 1;
                 session->total_size = msg_size;
                 session->packets_received = 0;
-                uint8_t packets_to_request = std::min(
-                    static_cast<uint8_t>(total_packets),
-                    config.max_cts_packets);
+                session->rts_max_packets = rts_max_packets; // 保存RTS中的最大包数限制
+                uint8_t packets_to_request = std::min({
+                    static_cast<uint8_t>(total_packets), // 不超过总包数
+                    config.max_cts_packets,              // 不超过本地CTS限制
+                    rts_max_packets                      // 不超过发送方指定的限制
+                });
                 session->packets_requested = packets_to_request;
                 session->state = SessionState::RECEIVING;
                 session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
                 sessions_[sid] = session;
                 return sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
             }
+
             auto session = sessions_[sid];
             if (!session)
             {
@@ -475,9 +484,12 @@ namespace j1939sim
             session->sequence_number = 1;
             session->total_size = msg_size;
             session->packets_received = 0;
-            uint8_t packets_to_request = std::min(
-                static_cast<uint8_t>(total_packets),
-                config.max_cts_packets);
+            session->rts_max_packets = rts_max_packets; // 更新RTS中的最大包数限制
+            uint8_t packets_to_request = std::min({
+                static_cast<uint8_t>(total_packets), // 不超过总包数
+                config.max_cts_packets,              // 不超过本地CTS限制
+                rts_max_packets                      // 不超过发送方指定的限制
+            });
             session->packets_requested = packets_to_request;
             session->state = SessionState::RECEIVING;
             session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
@@ -564,12 +576,15 @@ namespace j1939sim
 
     bool J1939Simulation::sendRTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t total_size, uint8_t total_packets, uint32_t pgn)
     {
+        // 获取源地址节点的配置以使用其max_rts_packets值
+        auto config = getNodeConfig(src_addr);
+
         uint8_t data[8] = {
             static_cast<uint8_t>(TpCmType::RTS),            // Control byte = 16 (RTS)
             static_cast<uint8_t>(total_size & 0xFF),        // Total message size LSB
             static_cast<uint8_t>((total_size >> 8) & 0xFF), // Total message size MSB
             total_packets,                                  // Total number of packets
-            0xFF,                                           // Maximum number of packets that can be sent (no limit)
+            config.max_rts_packets,                         // Maximum number of packets that can be sent
             static_cast<uint8_t>(pgn & 0xFF),               // PGN byte 1 (LSB)
             static_cast<uint8_t>((pgn >> 8) & 0xFF),        // PGN byte 2
             static_cast<uint8_t>((pgn >> 16) & 0xFF)        // PGN byte 3 (MSB)
