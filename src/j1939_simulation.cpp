@@ -668,10 +668,10 @@ namespace j1939sim
             static_cast<uint8_t>(reason), // Include abort reason
             0xFF,
             0xFF,
+            0xFF,
             static_cast<uint8_t>(pgn & 0xFF),
             static_cast<uint8_t>((pgn >> 8) & 0xFF),
-            static_cast<uint8_t>((pgn >> 16) & 0xFF),
-            0xFF};
+            static_cast<uint8_t>((pgn >> 16) & 0xFF)};
 
         uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr;
         return transmitter(id, data, 8, context);
@@ -684,10 +684,10 @@ namespace j1939sim
             num_packets,                              // Number of packets that can be sent
             next_packet,                              // Next packet number to be sent
             0xFF,                                     // Reserved
+            0xFF,                                     // Reserved
             static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
             static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
             static_cast<uint8_t>((pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
-            0xFF                                      // Reserved
         };
 
         // CTS消息中，本地地址(dst_addr)应该在ID的低字节
