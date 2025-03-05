@@ -15,7 +15,7 @@ extern "C"
     j1939_handle_t j1939_sim_create(void);
     void j1939_sim_destroy(j1939_handle_t handle);
 
-    typedef bool (*Transmitter)(uint32_t id, uint8_t *data, size_t length, void *context);
+    typedef bool (*Transmitter)(uint32_t id, const uint8_t *data, size_t length, void *context);
     bool j1939_init(j1939_handle_t handle, Transmitter transmitter, void *context);
 
     bool j1939_transmit(j1939_handle_t handle, uint32_t id, uint8_t *data, size_t length);

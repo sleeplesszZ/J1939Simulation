@@ -105,21 +105,45 @@ namespace j1939sim
             session->dst_addr = dst_addr;
             session->pgn = pgn;
             session->priority = priority;
-            session->data.assign(data, data + length);
             session->total_packets = (length + 6) / 7;
+
+            // 初始化数据包存储
+            session->packets.resize(session->total_packets);
+            session->packet_sent.resize(session->total_packets, false);
+
+            // 分包存储 - 每个包8字节，第一个字节为序列号
+            for (size_t i = 0; i < session->total_packets; i++)
+            {
+                session->packets[i].resize(8);  // 固定8字节
+                session->packets[i][0] = i + 1; // 序列号从1开始
+
+                size_t offset = i * 7;
+                size_t remaining = length - offset;
+                size_t packet_size = std::min(remaining, size_t(7));
+
+                // 复制数据到包的后7个字节位置
+                std::copy_n(data + offset, packet_size, session->packets[i].data() + 1);
+
+                // 如果不足7字节，填充0xFF
+                if (packet_size < 7)
+                {
+                    std::fill_n(session->packets[i].data() + 1 + packet_size, 7 - packet_size, 0xFF);
+                }
+            }
+
             if (dst_addr == 0xFF)
             {
                 session->state = SessionState::SENDING;
                 session->next_action_time = std::chrono::steady_clock::now() +
                                             std::chrono::milliseconds(config.tp_packet_interval);
-                result = sendBAM(priority, src_addr, session->data.size(), session->total_packets, pgn);
+                result = sendBAM(priority, src_addr, length, session->total_packets, pgn);
             }
             else
             {
                 session->state = SessionState::WAIT_CTS;
                 session->next_action_time = std::chrono::steady_clock::now() +
                                             std::chrono::milliseconds(J1939Timeouts::T1);
-                result = sendRTS(priority, src_addr, dst_addr, session->data.size(), session->total_packets, pgn);
+                result = sendRTS(priority, src_addr, dst_addr, length, session->total_packets, pgn);
             }
             has_pending_sessions_ = true;
         }
@@ -216,12 +240,13 @@ namespace j1939sim
                 if (session->sequence_number <= session->total_packets)
                 {
                     if (!sendDataPacket(session->priority, session->src_addr,
-                                        session->dst_addr, session->sequence_number++,
-                                        session->data))
+                                        session->dst_addr, session->sequence_number,
+                                        session->packets))
                     {
                         return false;
                     }
-                    // 设置下一个数据包的发送时间
+                    session->packet_sent[session->sequence_number - 1] = true;
+                    session->sequence_number++;
                     session->next_action_time = std::chrono::steady_clock::now() +
                                                 std::chrono::milliseconds(config.tp_packet_interval);
                     return true;
@@ -231,14 +256,15 @@ namespace j1939sim
 
             // 点对点传输
             if (session->sequence_number <= session->total_packets &&
-                session->sequence_number <= session->sequence_number - 1 + config.max_cts_packets)
+                session->sequence_number <= session->sequence_number - 1 + session->packets_requested)
             {
                 if (!sendDataPacket(session->priority, session->src_addr,
-                                    session->dst_addr, session->sequence_number++,
-                                    session->data))
+                                    session->dst_addr, session->sequence_number,
+                                    session->packets))
                 {
                     return false;
                 }
+                session->packet_sent[session->sequence_number - 1] = true;
                 session->next_action_time = std::chrono::steady_clock::now() +
                                             std::chrono::milliseconds(config.tp_packet_interval);
                 return true;
@@ -374,13 +400,6 @@ namespace j1939sim
         // 计算数据偏移量和本次数据长度
         size_t offset = (sequence - 1) * 7;
         size_t data_length = std::min(size_t(7), session->total_size - offset);
-
-        // 确保数据缓冲区足够大
-        if (session->data.size() < offset + data_length)
-            session->data.resize(session->total_size);
-
-        // 复制数据
-        std::copy_n(data + 1, data_length, session->data.begin() + offset);
 
         session->packets_received++;
         session->sequence_number++;
@@ -628,18 +647,16 @@ namespace j1939sim
         return transmitter(id, data, 8, context);
     }
 
-    bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t packet_number, const std::vector<uint8_t> &data)
+    bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr,
+                                         size_t packet_number, const std::vector<std::vector<uint8_t>> &packets)
     {
-        uint8_t packet[8] = {static_cast<uint8_t>(packet_number)};
-        size_t offset = (packet_number - 1) * 7;
-        size_t remaining = data.size() - offset;
-        size_t length = std::min(remaining, size_t(7));
-
-        std::copy_n(data.begin() + offset, length, packet + 1);
-
-        uint32_t id = (priority << 26) | (PGN_TP_DT << 8) |
-                      (src_addr << 8) | dst_addr;
-        return transmitter(id, packet, 8, context);
+        // 数据包已经按照J1939格式预先组装好，直接发送
+        if (packet_number > 0 && packet_number <= packets.size())
+        {
+            uint32_t id = (priority << 26) | (PGN_TP_DT << 8) | (dst_addr);
+            return transmitter(id, packets[packet_number - 1].data(), 8, context);
+        }
+        return false;
     }
 
     // 添加sendEndOfMsgAck函数

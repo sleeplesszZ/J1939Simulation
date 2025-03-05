@@ -68,7 +68,9 @@ namespace j1939sim
         uint8_t priority{7}; // 添加优先级字段，默认为7
 
         // 数据管理
-        std::vector<uint8_t> data;
+        std::vector<std::vector<uint8_t>> packets; // 存储所有DT分包
+        std::vector<bool> packet_sent;             // 记录每个包是否已发送
+
         size_t total_packets{0};
         uint8_t sequence_number{1};
 
@@ -114,7 +116,8 @@ namespace j1939sim
         bool sendCTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint8_t num_packets, uint8_t next_packet, uint32_t pgn);
         bool sendEndOfMsgAck(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t total_size, uint8_t total_packets, uint32_t pgn);
         bool sendBAM(uint8_t priority, uint8_t src_addr, size_t total_size, uint8_t total_packets, uint32_t pgn);
-        bool sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t packet_number, const std::vector<uint8_t> &data);
+        bool sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr,
+                            size_t packet_number, const std::vector<std::vector<uint8_t>> &packets);
         bool sendAbort(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint32_t pgn, AbortReason reason);
 
         void processReceiveQueue();
