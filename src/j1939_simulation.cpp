@@ -206,7 +206,7 @@ namespace j1939sim
         switch (session->state)
         {
         case SessionState::WAIT_CTS:
-            sendAbort(session->dst_addr, session->src_addr, session->pgn, AbortReason::TIMEOUT); // 超时
+            sendAbort(session->priority, session->dst_addr, session->src_addr, session->pgn, AbortReason::TIMEOUT); // 超时
             return false;
         case SessionState::SENDING:
         {
@@ -215,7 +215,10 @@ namespace j1939sim
             {
                 if (session->sequence_number <= session->total_packets)
                 {
-                    if (!sendDataPacket(*session, session->sequence_number++))
+                    // 修改这里：使用新的sendDataPacket函数签名
+                    if (!sendDataPacket(session->priority, session->src_addr,
+                                        session->dst_addr, session->sequence_number++,
+                                        session->data))
                     {
                         return false;
                     }
@@ -242,14 +245,14 @@ namespace j1939sim
         }
     }
 
-    bool J1939Simulation::onReceive(const std::vector<ReceiveData> &data_list)
+    bool J1939Simulation::onReceive(uint32_t id, uint8_t *data, size_t length)
     {
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            for (const auto &data : data_list)
-            {
-                receive_queue_.push(data);
-            }
+            ReceiveData rd;
+            rd.id = id;
+            rd.data.assign(data, data + length);
+            receive_queue_.push(std::move(rd));
         }
         queue_cv_.notify_one();
         return true;
@@ -319,96 +322,83 @@ namespace j1939sim
 
     bool J1939Simulation::handleTPDataTransfer(uint32_t id, const uint8_t *data, size_t length)
     {
+        if (length != 8)
+            return false;
+
+        // 从CAN ID中提取地址信息
         uint8_t src_addr = id & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
+        uint8_t sequence = data[0];
 
-        std::shared_ptr<TransportSession> session;
+        // 创建会话标识
+        SessionId sid{src_addr, dst_addr, SessionRole::RECEIVER};
+
+        std::lock_guard<std::mutex> lock(session_mutex_);
+
+        // 查找对应的会话
+        auto it = sessions_.find(sid);
+        if (it == sessions_.end())
+            return false;
+
+        auto session = it->second;
+        if (!session || session->state != SessionState::RECEIVING)
+            return false;
+
+        // 验证序列号是否符合预期
+        if (sequence != session->sequence_number)
         {
-            std::lock_guard<std::mutex> lock(session_mutex_);
-
-            if (dst_addr == 0xFF)
-            {
-                // For BAM, find the session by source address
-                session = session_manager_.findActiveReceiveSession(src_addr, dst_addr, 0);
-            }
-            else
-            {
-                // For destination specific messages, allow multiple active sessions
-                auto sessions = session_manager_.findActiveReceiveSessions(src_addr, dst_addr);
-                if (sessions.size() > 1)
-                {
-                    // Multiple non-BAM sessions exist - abort them all
-                    for (const auto &s : sessions)
-                    {
-                        sendAbort(s->dst_addr, s->src_addr, s->pgn, AbortReason::RESOURCES_BUSY); // 资源被占用
-                    }
-                    return false;
-                }
-                session = sessions.empty() ? nullptr : sessions[0];
-            }
-
-            if (!session || session->state != SessionState::RECEIVING)
-            {
-                return false;
-            }
-
-            uint8_t seq = data[0];
-            if (seq != session->sequence_number)
-            {
-                sendAbort(session->src_addr, session->dst_addr, session->pgn, AbortReason::BAD_SEQUENCE); // 序列号错误
-                return false;
-            }
-
-            // 保存数据
-            size_t offset = (seq - 1) * 7;
-            size_t remaining = session->total_size - offset;
-            size_t data_length = std::min(remaining, size_t(7));
-
-            // 确保数据缓冲区大小足够
-            if (session->data.size() < offset + data_length)
-            {
-                session->data.resize(offset + data_length);
-            }
-            std::copy_n(data + 1, data_length, session->data.begin() + offset);
-
-            session->sequence_number++;
-            session->packets_received++;
-
-            // 检查是否需要发送下一个CTS
-            if (session->packets_received == session->packets_requested)
-            {
-                if (session->sequence_number <= session->total_packets)
-                {
-                    // 还有更多包需要接收
-                    auto config = node_manager_.getNodeConfig(session->dst_addr);
-                    if (!config)
-                        return false;
-
-                    uint8_t packets_to_request = std::min(
-                        static_cast<uint8_t>(session->total_packets - session->sequence_number + 1),
-                        config->max_cts_packets);
-
-                    session->packets_requested = packets_to_request;
-                    session->packets_received = 0;
-                    return sendCTS(session, packets_to_request);
-                }
-                else
-                {
-                    // 所有包都已接收完成
-                    session->state = SessionState::COMPLETE;
-                    bool ack_result = sendEndOfMsgAck(session->src_addr, *session); // 更新函数调用
-
-                    // 发送完EndOfMsgAck后清理会话
-                    session_manager_.removeSession(session->src_addr,
-                                                   session->dst_addr,
-                                                   session->pgn,
-                                                   SessionRole::RECEIVER);
-
-                    return ack_result;
-                }
-            }
-            return true;
+            // 序列号错误，中止传输
+            sendAbort(session->priority, dst_addr, src_addr, session->pgn, AbortReason::BAD_SEQUENCE);
+            sessions_.erase(it);
+            return false;
         }
+
+        // 计算数据偏移量和本次数据长度
+        size_t offset = (sequence - 1) * 7;
+        size_t data_length = std::min(size_t(7), session->total_size - offset);
+
+        // 确保数据缓冲区足够大
+        if (session->data.size() < offset + data_length)
+            session->data.resize(session->total_size);
+
+        // 复制数据
+        std::copy_n(data + 1, data_length, session->data.begin() + offset);
+
+        session->packets_received++;
+        session->sequence_number++;
+
+        // 检查是否需要发送新的CTS
+        if (session->packets_received == session->packets_requested &&
+            session->packets_received < session->total_packets)
+        {
+            // 计算剩余需要接收的数据包数量
+            uint8_t remaining_packets = session->total_packets - session->packets_received;
+            auto config = getNodeConfig(dst_addr);
+            uint8_t packets_to_request = std::min(remaining_packets, config.max_cts_packets);
+
+            // 发送CTS请求下一组数据包
+            session->packets_requested += packets_to_request;
+            session->next_action_time = std::chrono::steady_clock::now() +
+                                        std::chrono::milliseconds(J1939Timeouts::T2);
+            return sendCTS(session->priority, dst_addr, src_addr,
+                           packets_to_request, session->sequence_number, session->pgn);
+        }
+
+        // 检查是否接收完成
+        if (session->packets_received == session->total_packets)
+        {
+            // 发送结束确认
+            bool result = sendEndOfMsgAck(session->priority, dst_addr, src_addr,
+                                          session->total_size, session->total_packets,
+                                          session->pgn);
+            sessions_.erase(it);
+            return result;
+        }
+
+        // 更新下一次超时检查时间
+        session->next_action_time = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(J1939Timeouts::T1);
+        return true;
     }
 
     bool J1939Simulation::handleTPConnectMangement(uint32_t id, const uint8_t *data, size_t length)
@@ -472,7 +462,7 @@ namespace j1939sim
             // 已存在相同的会话，但PGN不同
             if (pgn != session->pgn)
             {
-                sendAbort(dst_addr, src_addr, pgn, AbortReason::INCOMPLETE_TRANSFER); // 未完成的传输
+                sendAbort(priority, dst_addr, src_addr, pgn, AbortReason::INCOMPLETE_TRANSFER); // 未完成的传输
                 return false;
             }
 
@@ -572,111 +562,74 @@ namespace j1939sim
         }
     }
 
-    bool J1939Simulation::sendRTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint32_t size, uint8_t total_packets, uint32_t pgn)
+    bool J1939Simulation::sendRTS(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t total_size, uint8_t total_packets, uint32_t pgn)
     {
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::RTS),      // Control byte = 16 (RTS)
-            static_cast<uint8_t>(size & 0xFF),        // Total message size LSB
-            static_cast<uint8_t>((size >> 8) & 0xFF), // Total message size MSB
-            total_packets,                            // Total number of packets
-            0xFF,                                     // Maximum number of packets that can be sent (no limit)
-            static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
-            static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
-            static_cast<uint8_t>((pgn >> 16) & 0xFF)  // PGN byte 3 (MSB)
+            static_cast<uint8_t>(TpCmType::RTS),            // Control byte = 16 (RTS)
+            static_cast<uint8_t>(total_size & 0xFF),        // Total message size LSB
+            static_cast<uint8_t>((total_size >> 8) & 0xFF), // Total message size MSB
+            total_packets,                                  // Total number of packets
+            0xFF,                                           // Maximum number of packets that can be sent (no limit)
+            static_cast<uint8_t>(pgn & 0xFF),               // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),        // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF)        // PGN byte 3 (MSB)
         };
 
         uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | dst_addr;
         return transmitter(id, data, 8, context);
     }
 
-    bool J1939Simulation::sendBAM(const TransportSession &session)
+    bool J1939Simulation::sendBAM(uint8_t priority, uint8_t src_addr, size_t total_size, uint8_t total_packets, uint32_t pgn)
     {
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::BAM),
-            static_cast<uint8_t>(session.data.size()),
-            static_cast<uint8_t>(session.total_packets),
-            0xFF,
-            static_cast<uint8_t>(session.pgn & 0xFF),
-            static_cast<uint8_t>((session.pgn >> 8) & 0xFF),
-            static_cast<uint8_t>((session.pgn >> 16) & 0xFF),
-            0xFF};
-
-        uint32_t id = (session.priority << 26) | (PGN_TP_CM << 8) | 0xFF;
-        return transmitter(id, data, 8, context);
-    }
-
-    bool J1939Simulation::sendBAM(uint8_t priority, uint8_t src_addr, uint32_t size, uint8_t total_packets, uint32_t pgn)
-    {
-        uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::BAM),      // Control byte = 32 (BAM)
-            static_cast<uint8_t>(size & 0xFF),        // Total message size LSB
-            static_cast<uint8_t>((size >> 8) & 0xFF), // Total message size MSB
-            total_packets,                            // Total number of packets
-            static_cast<uint8_t>(pgn & 0xFF),         // PGN byte 1 (LSB)
-            static_cast<uint8_t>((pgn >> 8) & 0xFF),  // PGN byte 2
-            static_cast<uint8_t>((pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
-            0xFF                                      // Reserved
+            static_cast<uint8_t>(TpCmType::BAM),            // Control byte = 32 (BAM)
+            static_cast<uint8_t>(total_size & 0xFF),        // Total message size LSB
+            static_cast<uint8_t>((total_size >> 8) & 0xFF), // Total message size MSB
+            total_packets,                                  // Total number of packets
+            static_cast<uint8_t>(pgn & 0xFF),               // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),        // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF),       // PGN byte 3 (MSB)
+            0xFF                                            // Reserved
         };
 
         uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | 0xFF; // BAM always broadcasts (0xFF)
         return transmitter(id, data, 8, context);
     }
 
-    bool J1939Simulation::sendDataPacket(const TransportSession &session, size_t packet_number)
+    bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t packet_number, const std::vector<uint8_t> &data)
     {
-        uint8_t data[8] = {static_cast<uint8_t>(packet_number)};
+        uint8_t packet[8] = {static_cast<uint8_t>(packet_number)};
         size_t offset = (packet_number - 1) * 7;
-        size_t remaining = session.data.size() - offset;
+        size_t remaining = data.size() - offset;
         size_t length = std::min(remaining, size_t(7));
 
-        std::copy_n(session.data.begin() + offset, length, data + 1);
+        std::copy_n(data.begin() + offset, length, packet + 1);
 
-        uint32_t id = (session.priority << 26) | (PGN_TP_DT << 8) |
-                      (session.is_bam ? 0xFF : session.dst_addr);
-        return transmitter(id, data, 8, context);
-    }
-
-    // 添加CTS发送函数
-    bool J1939Simulation::sendCTS(const std::shared_ptr<TransportSession> &session, uint8_t num_packets)
-    {
-        uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::CTS),               // Control byte = CTS command
-            num_packets,                                       // Number of packets that can be sent
-            session->sequence_number,                          // Next packet number
-            0xFF,                                              // Reserved
-            static_cast<uint8_t>(session->pgn & 0xFF),         // PGN byte 1 (LSB)
-            static_cast<uint8_t>((session->pgn >> 8) & 0xFF),  // PGN byte 2
-            static_cast<uint8_t>((session->pgn >> 16) & 0xFF), // PGN byte 3 (MSB)
-            0xFF                                               // Reserved
-        };
-
-        // CTS消息中，本地地址(session->dst_addr)应该在ID的低字节
-        // 目标地址(session->src_addr)应该在PS字段
-        uint32_t id = (session->priority << 26) | (PGN_TP_CM << 8) |
-                      (session->src_addr << 8) | session->dst_addr;
-        return transmitter(id, data, 8, context);
+        uint32_t id = (priority << 26) | (PGN_TP_DT << 8) |
+                      (src_addr << 8) | dst_addr;
+        return transmitter(id, packet, 8, context);
     }
 
     // 添加sendEndOfMsgAck函数
-    bool J1939Simulation::sendEndOfMsgAck(uint8_t src_addr, const TransportSession &session)
+    bool J1939Simulation::sendEndOfMsgAck(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, size_t total_size, uint8_t total_packets, uint32_t pgn)
     {
         uint8_t data[8] = {
-            static_cast<uint8_t>(TpCmType::EndOfMsgAck),     // Control byte = 19
-            static_cast<uint8_t>(session.total_size & 0xFF), // Total message size LSB
-            static_cast<uint8_t>(session.total_size >> 8),   // Total message size MSB
-            static_cast<uint8_t>(session.total_packets),     // Total number of packets
-            0xFF,                                            // Reserved, must be 0xFF
-            static_cast<uint8_t>(session.pgn & 0xFF),        // PGN byte 1 (LSB)
-            static_cast<uint8_t>((session.pgn >> 8) & 0xFF), // PGN byte 2
-            static_cast<uint8_t>((session.pgn >> 16) & 0xFF) // PGN byte 3 (MSB)
+            static_cast<uint8_t>(TpCmType::EndOfMsgAck), // Control byte = 19
+            static_cast<uint8_t>(total_size & 0xFF),     // Total message size LSB
+            static_cast<uint8_t>(total_size >> 8),       // Total message size MSB
+            static_cast<uint8_t>(total_packets),         // Total number of packets
+            0xFF,                                        // Reserved, must be 0xFF
+            static_cast<uint8_t>(pgn & 0xFF),            // PGN byte 1 (LSB)
+            static_cast<uint8_t>((pgn >> 8) & 0xFF),     // PGN byte 2
+            static_cast<uint8_t>((pgn >> 16) & 0xFF)     // PGN byte 3 (MSB)
         };
 
-        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | src_addr; // 使用默认优先级7
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr; // 使用默认优先级7
         return transmitter(id, data, 8, context);
     }
 
     // Add new overload of sendAbort that includes reason code
-    bool J1939Simulation::sendAbort(uint8_t dst_addr, uint8_t src_addr, uint32_t pgn, AbortReason reason)
+    bool J1939Simulation::sendAbort(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, uint32_t pgn, AbortReason reason)
     {
         uint8_t data[8] = {
             static_cast<uint8_t>(TpCmType::Abort),
@@ -688,7 +641,7 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 16) & 0xFF),
             0xFF};
 
-        uint32_t id = (7 << 26) | (PGN_TP_CM << 8) | dst_addr;
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr;
         return transmitter(id, data, 8, context);
     }
 
