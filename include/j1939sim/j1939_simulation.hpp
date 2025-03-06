@@ -67,7 +67,7 @@ namespace j1939sim
         uint32_t pgn{0};
         uint8_t priority{7}; // 添加优先级字段，默认为7
 
-        // 数据管理
+        // 发送相关字段
         std::vector<std::vector<uint8_t>> packets; // 存储所有DT分包
         std::vector<bool> packet_sent;             // 记录每个包是否已发送
 

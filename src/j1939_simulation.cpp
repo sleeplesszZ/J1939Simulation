@@ -256,7 +256,7 @@ namespace j1939sim
 
             // 点对点传输
             if (session->sequence_number <= session->total_packets &&
-                session->sequence_number <= session->sequence_number - 1 + session->packets_requested)
+                session->sequence_number <= session->packets_requested)
             {
                 if (!sendDataPacket(session->priority, session->src_addr,
                                     session->dst_addr, session->sequence_number,
@@ -265,21 +265,34 @@ namespace j1939sim
                     return false;
                 }
                 session->packet_sent[session->sequence_number - 1] = true;
+                session->sequence_number++;
                 session->next_action_time = std::chrono::steady_clock::now() +
                                             std::chrono::milliseconds(config.tp_packet_interval);
                 return true;
             }
 
             // 完成当前CTS请求的数据包发送后
-            if (session->sequence_number < session->total_packets)
+            if (session->sequence_number <= session->total_packets)
             {
-                session->state = SessionState::WAIT_CTS;
-                session->next_action_time = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(J1939Timeouts::T3);
+                bool has_unsent = std::any_of(
+                    session->packet_sent.begin() + session->sequence_number - 1,
+                    session->packet_sent.end(),
+                    [](bool sent)
+                    { return !sent; });
+
+                if (has_unsent)
+                {
+                    session->state = SessionState::WAIT_CTS;
+                    session->next_action_time = std::chrono::steady_clock::now() +
+                                                std::chrono::milliseconds(J1939Timeouts::T3);
+                }
+                else
+                {
+                    return false; // 所有包已发送完成
+                }
             }
             return true;
         }
-
         case SessionState::RECEIVING:
         case SessionState::COMPLETE:
             return false;
@@ -555,11 +568,20 @@ namespace j1939sim
             uint8_t num_packets = data[1];
             uint8_t next_packet = data[2];
 
+            // 检查请求的包序号是否有效
+            if (next_packet < 1 || next_packet > session->total_packets)
+            {
+                sendAbort(session->priority, dst_addr, src_addr, session->pgn, AbortReason::BAD_SEQUENCE);
+                sessions_.erase(it);
+                return false;
+            }
+
             session->packets_requested = num_packets;
             session->sequence_number = next_packet;
             session->state = SessionState::SENDING;
             session->next_action_time = std::chrono::steady_clock::now() +
                                         std::chrono::milliseconds(config.tp_packet_interval);
+            has_pending_sessions_ = true;
             return true;
         }
         case TpCmType::EndOfMsgAck:
@@ -627,7 +649,7 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 16) & 0xFF)        // PGN byte 3 (MSB)
         };
 
-        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | dst_addr;
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
         return transmitter(id, data, 8, context);
     }
 
@@ -643,7 +665,8 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 16) & 0xFF)        // PGN byte 3 (MSB)
         };
 
-        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | 0xFF; // BAM always broadcasts (0xFF)
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (0xFF << 8) | src_addr;
+        ; // BAM always broadcasts (0xFF)
         return transmitter(id, data, 8, context);
     }
 
@@ -653,7 +676,7 @@ namespace j1939sim
         // 数据包已经按照J1939格式预先组装好，直接发送
         if (packet_number > 0 && packet_number <= packets.size())
         {
-            uint32_t id = (priority << 26) | (PGN_TP_DT << 8) | (dst_addr);
+            uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
             return transmitter(id, packets[packet_number - 1].data(), 8, context);
         }
         return false;
@@ -673,7 +696,7 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 16) & 0xFF)     // PGN byte 3 (MSB)
         };
 
-        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr; // 使用默认优先级7
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr; // 使用默认优先级7
         return transmitter(id, data, 8, context);
     }
 
@@ -690,7 +713,7 @@ namespace j1939sim
             static_cast<uint8_t>((pgn >> 8) & 0xFF),
             static_cast<uint8_t>((pgn >> 16) & 0xFF)};
 
-        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr;
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
         return transmitter(id, data, 8, context);
     }
 
@@ -709,7 +732,7 @@ namespace j1939sim
 
         // CTS消息中，本地地址(dst_addr)应该在ID的低字节
         // 目标地址(src_addr)应该在PS字段
-        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (src_addr << 8) | dst_addr;
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
         return transmitter(id, data, 8, context);
     }
 
