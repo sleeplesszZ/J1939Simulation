@@ -145,12 +145,13 @@ namespace j1939sim
                                             std::chrono::milliseconds(J1939Timeouts::T1);
                 result = sendRTS(priority, src_addr, dst_addr, length, session->total_packets, pgn);
             }
+            // 通知
             has_pending_sessions_ = true;
-        }
-
-        if (result)
-        {
-            session_cv_.notify_one();
+            if (session->next_action_time < next_session_check_)
+            {
+                next_session_check_ = session->next_action_time;
+                session_cv_.notify_one(); // 需要立即处理更早的超时
+            }
         }
 
         return result;
@@ -164,8 +165,8 @@ namespace j1939sim
 
             // 等待直到下一个检查时间点或有新的会话需要处理
             auto now = std::chrono::steady_clock::now();
-            session_cv_.wait_until(lock, next_session_check_, [this, now]()
-                                   { return !running_ || has_pending_sessions_ || now >= next_session_check_; });
+            session_cv_.wait_until(lock, next_session_check_, [this]()
+                                   { return !running_ || has_pending_sessions_; });
 
             if (!running_)
             {
@@ -434,8 +435,16 @@ namespace j1939sim
             session->packets_requested += packets_to_request;
             session->next_action_time = std::chrono::steady_clock::now() +
                                         std::chrono::milliseconds(J1939Timeouts::T2);
-            return sendCTS(session->priority, dst_addr, src_addr,
-                           packets_to_request, session->sequence_number, session->pgn);
+            auto ret = sendCTS(session->priority, dst_addr, src_addr,
+                               packets_to_request, session->sequence_number, session->pgn);
+            // 通知
+            has_pending_sessions_ = true;
+            if (session->next_action_time < next_session_check_)
+            {
+                next_session_check_ = session->next_action_time;
+                session_cv_.notify_one(); // 需要立即处理更早的超时
+            }
+            return ret;
         }
 
         // 检查是否接收完成
@@ -452,6 +461,13 @@ namespace j1939sim
         // 更新下一次超时检查时间
         session->next_action_time = std::chrono::steady_clock::now() +
                                     std::chrono::milliseconds(J1939Timeouts::T1);
+        // 通知
+        has_pending_sessions_ = true;
+        if (session->next_action_time < next_session_check_)
+        {
+            next_session_check_ = session->next_action_time;
+            session_cv_.notify_one(); // 需要立即处理更早的超时
+        }
         return true;
     }
 
@@ -509,7 +525,15 @@ namespace j1939sim
                 session->state = SessionState::RECEIVING;
                 session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
                 sessions_[sid] = session;
-                return sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
+                auto ret = sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
+                // 通知
+                has_pending_sessions_ = true;
+                if (session->next_action_time < next_session_check_)
+                {
+                    next_session_check_ = session->next_action_time;
+                    session_cv_.notify_one(); // 需要立即处理更早的超时
+                }
+                return ret;
             }
 
             auto session = sessions_[sid];
@@ -543,7 +567,15 @@ namespace j1939sim
             session->packets_requested = packets_to_request;
             session->state = SessionState::RECEIVING;
             session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
-            return sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
+            auto ret = sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
+            // 通知
+            has_pending_sessions_ = true;
+            if (session->next_action_time < next_session_check_)
+            {
+                next_session_check_ = session->next_action_time;
+                session_cv_.notify_one(); // 需要立即处理更早的超时
+            }
+            return ret;
         }
         case TpCmType::CTS:
         {
@@ -581,7 +613,13 @@ namespace j1939sim
             session->state = SessionState::SENDING;
             session->next_action_time = std::chrono::steady_clock::now() +
                                         std::chrono::milliseconds(config.cmdt_packet_delay);
+            // 通知
             has_pending_sessions_ = true;
+            if (session->next_action_time < next_session_check_)
+            {
+                next_session_check_ = session->next_action_time;
+                session_cv_.notify_one(); // 需要立即处理更早的超时
+            }
             return true;
         }
         case TpCmType::EndOfMsgAck:
