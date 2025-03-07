@@ -481,8 +481,8 @@ namespace j1939sim
         case TpCmType::RTS:
         {
             std::lock_guard<std::mutex> lock(session_mutex_);
-            uint32_t msg_size = data[1];
-            uint8_t total_packets = data[2];
+            uint32_t msg_size = data[1] | (data[2] << 8);
+            uint8_t total_packets = data[3];
             uint8_t rts_max_packets = data[4]; // 获取RTS中的最大包数限制
             auto sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
 
