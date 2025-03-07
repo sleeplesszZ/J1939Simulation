@@ -30,12 +30,13 @@ namespace j1939sim
 
     struct NodeConfig
     {
-        bool enable_tx{true};            // 是否开启发送
-        bool enable_rx{true};            // 是否开启接收
-        bool active{true};               // 节点是否激活
-        uint32_t tp_packet_interval{50}; // 传输协议数据包间隔(毫秒)
-        uint8_t max_cts_packets{8};      // 单次CTS请求的最大数据包数, 默认8
-        uint8_t max_rts_packets{0xFF};   // RTS报文中允许的最大数据包数，默认0xFF表示无限制
+        bool enable_tx{true};             // 是否开启发送
+        bool enable_rx{true};             // 是否开启接收
+        bool active{true};                // 节点是否激活
+        uint32_t bam_packet_interval{50}; // 广播数据包间隔(毫秒)
+        uint32_t cmdt_packet_delay{1};    // 连接模式下，包发送延时
+        uint8_t max_cts_packets{8};       // 单次CTS请求的最大数据包数, 默认8
+        uint8_t max_rts_packets{0xFF};    // RTS报文中允许的最大数据包数，默认0xFF表示无限制
     };
 
     // 添加角色标识

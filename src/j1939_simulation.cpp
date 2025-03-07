@@ -135,7 +135,7 @@ namespace j1939sim
             {
                 session->state = SessionState::SENDING;
                 session->next_action_time = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(config.tp_packet_interval);
+                                            std::chrono::milliseconds(config.bam_packet_interval);
                 result = sendBAM(priority, src_addr, length, session->total_packets, pgn);
             }
             else
@@ -248,7 +248,7 @@ namespace j1939sim
                     session->packet_sent[session->sequence_number - 1] = true;
                     session->sequence_number++;
                     session->next_action_time = std::chrono::steady_clock::now() +
-                                                std::chrono::milliseconds(config.tp_packet_interval);
+                                                std::chrono::milliseconds(config.bam_packet_interval);
                     return true;
                 }
                 return false; // BAM完成
@@ -267,7 +267,7 @@ namespace j1939sim
                 session->packet_sent[session->sequence_number - 1] = true;
                 session->sequence_number++;
                 session->next_action_time = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(config.tp_packet_interval);
+                                            std::chrono::milliseconds(config.cmdt_packet_delay);
                 return true;
             }
 
@@ -580,7 +580,7 @@ namespace j1939sim
             session->sequence_number = next_packet;
             session->state = SessionState::SENDING;
             session->next_action_time = std::chrono::steady_clock::now() +
-                                        std::chrono::milliseconds(config.tp_packet_interval);
+                                        std::chrono::milliseconds(config.cmdt_packet_delay);
             has_pending_sessions_ = true;
             return true;
         }
