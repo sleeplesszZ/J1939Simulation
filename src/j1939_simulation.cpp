@@ -708,16 +708,10 @@ namespace j1939sim
         return transmitter(id, data, 8, context);
     }
 
-    bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr,
-                                         size_t packet_number, const std::vector<std::vector<uint8_t>> &packets)
-    {
-        // 数据包已经按照J1939格式预先组装好，直接发送
-        if (packet_number > 0 && packet_number <= packets.size())
+        bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, const std::vector<uint8_t> &packet)
         {
             uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
-            return transmitter(id, packets[packet_number - 1].data(), 8, context);
-        }
-        return false;
+            return transmitter(id, packet.data(), 8, context);
     }
 
     // 添加sendEndOfMsgAck函数
