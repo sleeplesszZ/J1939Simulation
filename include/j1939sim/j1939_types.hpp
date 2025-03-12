@@ -19,8 +19,9 @@ namespace j1939sim
     // 会话状态
     enum class SessionState
     {
-        WAIT_CTS,  // 发送方等待CTS
-        SENDING,   // 发送数据包
+        WAIT_CTS, // 发送方等待CTS
+        SENDING,  // 发送数据包
+        WAIT_ACK,
         RECEIVING, // 接收数据包
         COMPLETE   // 会话完成
     };

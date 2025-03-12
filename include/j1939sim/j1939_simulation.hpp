@@ -30,13 +30,13 @@ namespace j1939sim
 
     struct NodeConfig
     {
+        bool active{true};                // 节点是否激活
         bool enable_tx{true};             // 是否开启发送
         bool enable_rx{true};             // 是否开启接收
-        bool active{true};                // 节点是否激活
         uint32_t bam_packet_interval{50}; // 广播数据包间隔(毫秒)
         uint32_t cmdt_packet_delay{1};    // 连接模式下，包发送延时
-        uint8_t max_cts_packets{8};       // 单次CTS请求的最大数据包数, 默认8
-        uint8_t max_rts_packets{0xFF};    // RTS报文中允许的最大数据包数，默认0xFF表示无限制
+        uint8_t max_cts_packets{16};      // 单次CTS请求的最大数据包数, 默认16
+        uint8_t max_rts_packets{255};     // RTS报文中允许的最大数据包数，默认255表示无限制
     };
 
     // 添加角色标识
@@ -68,17 +68,13 @@ namespace j1939sim
         uint32_t pgn{0};
         uint8_t priority{7}; // 添加优先级字段，默认为7
 
-        uint32_t total_size{0}; // 总数据大小
-        size_t total_packets{0};
-
-        // 发送相关字段
+        uint32_t total_size{0};                    // 总数据大小
+        size_t total_packets{0};                   // 总包数
         std::vector<std::vector<uint8_t>> packets; // 存储所有DT分包
         std::vector<bool> packet_sent;             // 记录每个包是否已发送
 
-        // 添加接收相关字段
-        uint8_t sequence_number{1};
-        size_t packets_received{0};  // 已接收的数据包数
-        size_t packets_requested{0}; // 当前CTS请求的数据包数
+        uint8_t need_packets{0};    // 需要发送或接收的数据包
+        uint8_t next_packet_num{1}; // 下一个要发送或者接收数据包的序列号
 
         uint8_t rts_max_packets{0xFF}; // RTS中指定的最大包数限制
 

@@ -238,16 +238,16 @@ namespace j1939sim
             // 广播消息
             if (session->dst_addr == 0xFF)
             {
-                if (session->sequence_number <= session->total_packets)
+                if (0 < session->next_packet_num && session->next_packet_num <= session->total_packets)
                 {
                     if (!sendDataPacket(session->priority, session->src_addr,
-                                        session->dst_addr, session->sequence_number,
-                                        session->packets))
+                                        session->dst_addr, session->packets[session->next_packet_num - 1]))
                     {
                         return false;
                     }
-                    session->packet_sent[session->sequence_number - 1] = true;
-                    session->sequence_number++;
+                    session->packet_sent[session->next_packet_num - 1] = true;
+                    session->next_packet_num++;
+                    session->need_packets--;
                     session->next_action_time = std::chrono::steady_clock::now() +
                                                 std::chrono::milliseconds(config.bam_packet_interval);
                     return true;
@@ -256,44 +256,39 @@ namespace j1939sim
             }
 
             // 点对点传输
-            if (session->sequence_number <= session->total_packets &&
-                session->sequence_number <= session->packets_requested)
+            if (session->next_packet_num <= session->total_packets &&
+                session->need_packets > 0)
             {
                 if (!sendDataPacket(session->priority, session->src_addr,
-                                    session->dst_addr, session->sequence_number,
-                                    session->packets))
+                                    session->dst_addr, session->packets[session->next_packet_num - 1]))
                 {
                     return false;
                 }
-                session->packet_sent[session->sequence_number - 1] = true;
-                session->sequence_number++;
+                session->packet_sent[session->next_packet_num - 1] = true;
+                session->next_packet_num++;
+                session->need_packets--;
+                if (session->next_packet_num > session->total_packets || session->need_packets <= 0)
+                {
+                    if (std::count(session->packet_sent.begin(), session->packet_sent.end(), true) >= session->total_packets)
+                    {
+                        session->state = SessionState::WAIT_ACK;
+                    }
+                    else
+                    {
+                        session->state = SessionState::WAIT_CTS;
+                    }
+                    session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T3);
+                    return true;
+                }
                 session->next_action_time = std::chrono::steady_clock::now() +
                                             std::chrono::milliseconds(config.cmdt_packet_delay);
                 return true;
             }
 
-            // 完成当前CTS请求的数据包发送后
-            if (session->sequence_number <= session->total_packets)
-            {
-                bool has_unsent = std::any_of(
-                    session->packet_sent.begin() + session->sequence_number - 1,
-                    session->packet_sent.end(),
-                    [](bool sent)
-                    { return !sent; });
-
-                if (has_unsent)
-                {
-                    session->state = SessionState::WAIT_CTS;
-                    session->next_action_time = std::chrono::steady_clock::now() +
-                                                std::chrono::milliseconds(J1939Timeouts::T3);
-                }
-                else
-                {
-                    return false; // 所有包已发送完成
-                }
-            }
-            return true;
+            sendAbort(session->priority, session->src_addr, session->dst_addr, session->pgn, AbortReason::ABORT_BY_SENDER);
+            return false;
         }
+        case SessionState::WAIT_ACK:
         case SessionState::RECEIVING:
         case SessionState::COMPLETE:
             return false;
@@ -386,57 +381,56 @@ namespace j1939sim
         // 从CAN ID中提取地址信息
         uint8_t src_addr = id & 0xFF;
         uint8_t dst_addr = (id >> 8) & 0xFF;
-        uint8_t sequence = data[0];
 
         // 创建会话标识
         SessionId sid{src_addr, dst_addr, SessionRole::RECEIVER};
-
-        std::lock_guard<std::mutex> lock(session_mutex_);
-
-        // 查找对应的会话
-        auto it = sessions_.find(sid);
-        if (it == sessions_.end())
-            return false;
-
-        auto session = it->second;
-        if (!session || session->state != SessionState::RECEIVING)
-            return false;
-
-        // 验证序列号是否符合预期
-        if (sequence != session->sequence_number)
         {
-            // 序列号错误，中止传输
-            sendAbort(session->priority, dst_addr, src_addr, session->pgn, AbortReason::BAD_SEQUENCE);
-            sessions_.erase(it);
-            return false;
-        }
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            // 查找对应的会话
+            auto it = sessions_.find(sid);
+            if (it == sessions_.end())
+                return false;
 
-        // 计算数据偏移量和本次数据长度
-        size_t offset = (sequence - 1) * 7;
-        size_t data_length = std::min(size_t(7), session->total_size - offset);
+            auto session = it->second;
+            if (!session || session->state != SessionState::RECEIVING)
+                return false;
 
-        session->packets_received++;
-        session->sequence_number++;
+            // 验证序列号是否符合预期
+            if (data[0] != session->next_packet_num)
+            {
+                // 序列号错误，中止传输
+                sendAbort(session->priority, dst_addr, src_addr, session->pgn, AbortReason::BAD_SEQUENCE);
+                sessions_.erase(it);
+                return false;
+            }
 
-        // 检查是否需要发送新的CTS
-        if (session->packets_received == session->packets_requested &&
-            session->packets_received < session->total_packets)
-        {
-            // 计算剩余需要接收的数据包数量
-            uint8_t remaining_packets = session->total_packets - session->packets_received;
-            auto config = getNodeConfig(dst_addr);
-            uint8_t packets_to_request = std::min({
-                remaining_packets,       // 不超过剩余包数
-                config.max_cts_packets,  // 不超过本地CTS限制
-                session->rts_max_packets // 不超过发送方指定的限制
-            });
+            session->need_packets--;
+            session->next_packet_num++;
+            if (session->next_packet_num > session->total_packets)
+            {
+                sendEndOfMsgAck(session->priority, dst_addr, src_addr, session->total_size, session->total_packets, session->pgn);
+                sessions_.erase(it);
+                return true;
+            }
 
-            // 发送CTS请求下一组数据包
-            session->packets_requested += packets_to_request;
-            session->next_action_time = std::chrono::steady_clock::now() +
-                                        std::chrono::milliseconds(J1939Timeouts::T2);
-            auto ret = sendCTS(session->priority, dst_addr, src_addr,
-                               packets_to_request, session->sequence_number, session->pgn);
+            if (session->need_packets > 0)
+            {
+                // 更新下一次超时检查时间
+                session->next_action_time = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(J1939Timeouts::T1);
+            }
+            else
+            {
+                // 新CTS
+                uint8_t remaing = session->total_packets - session->next_packet_num + 1;
+                auto config = getNodeConfig(dst_addr);
+                uint8_t packets_to_request = std::min({remaing, config.max_cts_packets, session->rts_max_packets});
+                session->next_action_time = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(J1939Timeouts::T2);
+                session->need_packets = packets_to_request;
+                sendCTS(session->priority, dst_addr, src_addr, packets_to_request, session->next_packet_num, session->pgn);
+            }
+
             // 通知
             has_pending_sessions_ = true;
             if (session->next_action_time < next_session_check_)
@@ -444,29 +438,6 @@ namespace j1939sim
                 next_session_check_ = session->next_action_time;
                 session_cv_.notify_one(); // 需要立即处理更早的超时
             }
-            return ret;
-        }
-
-        // 检查是否接收完成
-        if (session->packets_received == session->total_packets)
-        {
-            // 发送结束确认
-            bool result = sendEndOfMsgAck(session->priority, dst_addr, src_addr,
-                                          session->total_size, session->total_packets,
-                                          session->pgn);
-            sessions_.erase(it);
-            return result;
-        }
-
-        // 更新下一次超时检查时间
-        session->next_action_time = std::chrono::steady_clock::now() +
-                                    std::chrono::milliseconds(J1939Timeouts::T1);
-        // 通知
-        has_pending_sessions_ = true;
-        if (session->next_action_time < next_session_check_)
-        {
-            next_session_check_ = session->next_action_time;
-            session_cv_.notify_one(); // 需要立即处理更早的超时
         }
         return true;
     }
@@ -511,17 +482,14 @@ namespace j1939sim
                 session->pgn = pgn;
                 session->src_addr = src_addr;
                 session->dst_addr = dst_addr;
-                session->total_packets = total_packets;
-                session->sequence_number = 1;
                 session->total_size = msg_size;
-                session->packets_received = 0;
+                session->total_packets = total_packets;
                 session->rts_max_packets = rts_max_packets; // 保存RTS中的最大包数限制
-                uint8_t packets_to_request = std::min({
-                    static_cast<uint8_t>(total_packets), // 不超过总包数
-                    config.max_cts_packets,              // 不超过本地CTS限制
-                    rts_max_packets                      // 不超过发送方指定的限制
-                });
-                session->packets_requested = packets_to_request;
+                uint8_t packets_to_request =
+                    std::min({session->total_packets, config.max_cts_packets, session->rts_max_packets});
+                session->need_packets = packets_to_request;
+                session->next_packet_num = 1;
+                // 会话状态
                 session->state = SessionState::RECEIVING;
                 session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
                 sessions_[sid] = session;
@@ -554,17 +522,14 @@ namespace j1939sim
             session->pgn = pgn;
             session->src_addr = src_addr;
             session->dst_addr = dst_addr;
-            session->total_packets = total_packets;
-            session->sequence_number = 1;
             session->total_size = msg_size;
-            session->packets_received = 0;
-            session->rts_max_packets = rts_max_packets; // 更新RTS中的最大包数限制
-            uint8_t packets_to_request = std::min({
-                static_cast<uint8_t>(total_packets), // 不超过总包数
-                config.max_cts_packets,              // 不超过本地CTS限制
-                rts_max_packets                      // 不超过发送方指定的限制
-            });
-            session->packets_requested = packets_to_request;
+            session->total_packets = total_packets;
+            session->rts_max_packets = rts_max_packets; // 保存RTS中的最大包数限制
+            uint8_t packets_to_request =
+                std::min({session->total_packets, config.max_cts_packets, session->rts_max_packets});
+            session->need_packets = packets_to_request;
+            session->next_packet_num = 1;
+            // 会话状态
             session->state = SessionState::RECEIVING;
             session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T2);
             auto ret = sendCTS(priority, dst_addr, src_addr, packets_to_request, 1, pgn);
@@ -600,19 +565,19 @@ namespace j1939sim
             uint8_t num_packets = data[1];
             uint8_t next_packet = data[2];
 
-            // 检查请求的包序号是否有效
-            if (next_packet < 1 || next_packet > session->total_packets)
+            if (num_packets == 0 || next_packet > session->total_packets)
             {
-                sendAbort(session->priority, dst_addr, src_addr, session->pgn, AbortReason::BAD_SEQUENCE);
-                sessions_.erase(it);
-                return false;
+                session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(J1939Timeouts::T4);
+            }
+            else
+            {
+                session->need_packets = num_packets;
+                session->next_packet_num = next_packet;
+                // 会话状态
+                session->state = SessionState::SENDING;
+                session->next_action_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(config.cmdt_packet_delay);
             }
 
-            session->packets_requested = num_packets;
-            session->sequence_number = next_packet;
-            session->state = SessionState::SENDING;
-            session->next_action_time = std::chrono::steady_clock::now() +
-                                        std::chrono::milliseconds(config.cmdt_packet_delay);
             // 通知
             has_pending_sessions_ = true;
             if (session->next_action_time < next_session_check_)
@@ -636,25 +601,13 @@ namespace j1939sim
         case TpCmType::Abort:
         {
             std::lock_guard<std::mutex> lock(session_mutex_);
-            auto sid = SessionId{dst_addr, src_addr, SessionRole::SENDER};
+            auto sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
             auto it = sessions_.find(sid);
             if (it == sessions_.end())
             {
                 return false;
             }
-            sid = SessionId{dst_addr, src_addr, SessionRole::RECEIVER};
-            it = sessions_.find(sid);
-            if (it == sessions_.end())
-            {
-                return false;
-            }
-            sid = SessionId{src_addr, dst_addr, SessionRole::SENDER};
-            it = sessions_.find(sid);
-            if (it == sessions_.end())
-            {
-                return false;
-            }
-            sid = SessionId{src_addr, dst_addr, SessionRole::RECEIVER};
+            sid = SessionId{dst_addr, src_addr, SessionRole::SENDER};
             it = sessions_.find(sid);
             if (it == sessions_.end())
             {
@@ -708,10 +661,10 @@ namespace j1939sim
         return transmitter(id, data, 8, context);
     }
 
-        bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, const std::vector<uint8_t> &packet)
-        {
-            uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
-            return transmitter(id, packet.data(), 8, context);
+    bool J1939Simulation::sendDataPacket(uint8_t priority, uint8_t src_addr, uint8_t dst_addr, const std::vector<uint8_t> &packet)
+    {
+        uint32_t id = (priority << 26) | (PGN_TP_CM << 8) | (dst_addr << 8) | src_addr;
+        return transmitter(id, packet.data(), 8, context);
     }
 
     // 添加sendEndOfMsgAck函数
