@@ -69,7 +69,7 @@ namespace j1939sim
         uint8_t priority{7}; // 添加优先级字段，默认为7
 
         uint32_t total_size{0};                    // 总数据大小
-        size_t total_packets{0};                   // 总包数
+        uint8_t total_packets{0};                  // 总包数
         std::vector<std::vector<uint8_t>> packets; // 存储所有DT分包
         std::vector<bool> packet_sent;             // 记录每个包是否已发送
 

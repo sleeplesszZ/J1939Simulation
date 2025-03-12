@@ -105,7 +105,7 @@ namespace j1939sim
             session->dst_addr = dst_addr;
             session->pgn = pgn;
             session->priority = priority;
-            session->total_packets = (length + 6) / 7;
+            session->total_packets = (uint8_t)(length + 6) / 7;
 
             // 初始化数据包存储
             session->packets.resize(session->total_packets);
